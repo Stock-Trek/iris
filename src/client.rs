@@ -56,7 +56,8 @@ where
         if guard.is_some() {
             return Ok(());
         }
-        let (message_sender, message_receiver) = channel::<Request>(self.config.channel_buffer_size);
+        let (message_sender, message_receiver) =
+            channel::<Request>(self.config.channel_buffer_size);
         let (disconnect_sender, disconnect_receiver) =
             channel::<()>(self.config.channel_buffer_size);
         let connected = Arc::new(AtomicBool::new(true));
