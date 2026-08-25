@@ -1,19 +1,18 @@
-pub mod circuit_breaker;
-pub mod client;
-pub mod config;
-pub mod error;
-pub mod handler;
-pub mod init_tests;
-pub mod listener;
-pub mod tls;
+mod circuit_breaker;
+mod client;
+mod config;
+mod error;
+mod handler;
+mod listener;
+#[cfg(test)]
+mod tests;
+mod tls;
 
-pub mod prelude {
-    pub use crate::{
-        circuit_breaker::CircuitBreakerConfig,
-        client::WebsocketClient,
-        config::{ServerCloseBehavior, WebsocketConfig},
-        error::ConnectionError,
-        listener::{MessageListener, MessageListenerTrait},
-        tls::TlsConfig,
-    };
-}
+pub use {
+    circuit_breaker::CircuitBreakerConfig,
+    client::WebsocketClient,
+    config::{ServerCloseBehavior, WebsocketConfig},
+    error::ConnectionError,
+    listener::{MessageListener, MessageListenerTrait},
+    tls::TlsConfig,
+};

@@ -200,8 +200,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::prelude::*;
+    use crate::*;
     use std::sync::Arc;
 
     #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]

@@ -1,9 +1,9 @@
-#[cfg(test)]
 #[ctor::ctor]
-fn init_tests() {
+fn init() {
     ensure_crypto();
 }
 
-pub fn ensure_crypto() {
+fn ensure_crypto() {
+    println!("ensure crypto");
     let _ = rustls::crypto::ring::default_provider().install_default();
 }

@@ -1,0 +1,8 @@
+[registries.shipyard]
+index = "ssh://git@ssh.shipyard.rs/stock-trek/crate-index.git"
+
+[registry]
+global-credential-providers = ["cargo:token"]
+
+[net]
+git-fetch-with-cli = true
