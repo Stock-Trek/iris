@@ -205,16 +205,21 @@ mod tests {
     use crate::*;
     use std::sync::Arc;
 
-    #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
-    struct TestMsg {
+    #[derive(serde::Serialize, Debug, Clone, PartialEq)]
+    struct TestRequest {
+        value: String,
+    }
+
+    #[derive(serde::Deserialize, Debug, Clone, PartialEq)]
+    struct TestResponse {
         value: String,
     }
 
     #[derive(Debug)]
     struct TestListener;
     #[async_trait::async_trait]
-    impl Listener<TestMsg> for TestListener {
-        async fn on_message(&self, _message: TestMsg) {}
+    impl Listener<TestResponse> for TestListener {
+        async fn on_message(&self, _message: TestResponse) {}
     }
 
     #[tokio::test]
@@ -232,7 +237,7 @@ mod tests {
         let mut client = client();
         connect(&mut client).await;
         let result = client
-            .send(TestMsg {
+            .send(TestRequest {
                 value: "test".to_string(),
             })
             .await;
@@ -244,7 +249,7 @@ mod tests {
     async fn send_message_when_not_connected_is_error() {
         let client = client();
         let result = client
-            .send(TestMsg {
+            .send(TestRequest {
                 value: "test".to_string(),
             })
             .await;
@@ -257,7 +262,7 @@ mod tests {
         connect(&mut client).await;
         disconnect(&mut client).await;
         let result = client
-            .send(TestMsg {
+            .send(TestRequest {
                 value: "test".to_string(),
             })
             .await;
@@ -292,18 +297,18 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    fn client() -> Client<TestMsg, TestMsg> {
+    fn client() -> Client<TestRequest, TestResponse> {
         let config = Config::new();
-        let listener: SharedListener<TestMsg> = Arc::new(TestListener);
+        let listener: SharedListener<TestResponse> = Arc::new(TestListener);
         Client::new(config, listener, "ws://localhost:0")
     }
-    async fn connect(client: &mut Client<TestMsg, TestMsg>) {
+    async fn connect(client: &mut Client<TestRequest, TestResponse>) {
         match client.connect().await {
             Ok(_) => {}
             _ => panic!("Client did not connect"),
         }
     }
-    async fn disconnect(client: &mut Client<TestMsg, TestMsg>) {
+    async fn disconnect(client: &mut Client<TestRequest, TestResponse>) {
         match client.disconnect().await {
             Ok(_) => {}
             _ => panic!("Client did not disconnect"),
