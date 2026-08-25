@@ -1,7 +1,7 @@
 use crate::{
-    config::{ServerCloseBehavior, WebsocketConfig},
+    config::{Config, ServerCloseBehavior},
     error::ConnectionError,
-    listener::MessageListener,
+    listener::SharedListener,
 };
 use futures::SinkExt;
 use rand::Rng;
@@ -28,8 +28,8 @@ where
     T: Serialize + DeserializeOwned + Send + 'static,
 {
     url: String,
-    config: WebsocketConfig,
-    listener: MessageListener<T>,
+    config: Config,
+    listener: SharedListener<T>,
     message_receiver: Receiver<T>,
     disconnect_receiver: Receiver<()>,
     connected: Arc<AtomicBool>,
@@ -48,8 +48,8 @@ where
 {
     pub(crate) fn new(
         url: &str,
-        config: WebsocketConfig,
-        listener: MessageListener<T>,
+        config: Config,
+        listener: SharedListener<T>,
         message_receiver: Receiver<T>,
         disconnect_receiver: Receiver<()>,
         connected: Arc<AtomicBool>,
@@ -76,7 +76,7 @@ where
     pub(crate) async fn run(mut self) {
         {
             let _guard = self.span.enter();
-            tracing::info!("websocket connection task started");
+            tracing::info!("connection task started");
         }
         loop {
             if self.is_disconnect_requested() {
@@ -100,7 +100,7 @@ where
             if self.is_disconnect_requested() {
                 break;
             }
-            match self.connect_websocket().await {
+            match self.connect().await {
                 Ok(()) => {
                     tracing::info!("connected");
                     self.reconnect_delay = self.config.circuit_breaker().initial_backoff();
@@ -163,7 +163,7 @@ where
         self.connected.store(false, Ordering::Relaxed);
         {
             let _guard = self.span.enter();
-            tracing::info!("websocket connection task finished");
+            tracing::info!("connection task finished");
         }
     }
 
@@ -242,10 +242,10 @@ where
         );
     }
 
-    async fn connect_websocket(&mut self) -> Result<(), ConnectionError> {
-        tracing::debug!("resolving websocket URI");
+    async fn connect(&mut self) -> Result<(), ConnectionError> {
+        tracing::debug!("resolving URI");
         let connector = self.config.tls_config().build_connector()?;
-        tracing::debug!("opening websocket connection");
+        tracing::debug!("opening connection");
         let (ws_stream, _response) = {
             let builder = ClientBuilder::new().uri(&self.url).map_err(|e| {
                 let err = ConnectionError::InvalidUri(e);
@@ -261,7 +261,7 @@ where
                         Ok(result) => result,
                         Err(e) => {
                             let err = ConnectionError::Websocket(e);
-                            tracing::error!(error = %err, "websocket connect failed");
+                            tracing::error!(error = %err, "connect failed");
                             self.listener.on_error(&err).await;
                             return Err(err);
                         }
@@ -272,7 +272,7 @@ where
                 }
             }
         };
-        tracing::info!("websocket connection established");
+        tracing::info!("connection established");
         self.ws_stream = Some(ws_stream);
         Ok(())
     }
@@ -280,7 +280,7 @@ where
     async fn handle_connection(&mut self) -> Result<(), ConnectionError> {
         {
             let _guard = self.span.enter();
-            tracing::info!("handling websocket connection");
+            tracing::info!("handling connection");
         }
         let mut ping_interval = tokio::time::interval(self.config.ping_interval());
         self.pong_deadline = None;
@@ -346,7 +346,7 @@ where
                 Ok(next_message) => self.handle_valid_message(next_message).await,
                 Err(e) => {
                     let err = ConnectionError::Websocket(e);
-                    tracing::error!(error = %err, "websocket read error");
+                    tracing::error!(error = %err, "read error");
                     self.listener.on_error(&err).await;
                     Err(err)
                 }
@@ -476,7 +476,7 @@ where
                 }
                 Err(e) => {
                     let err = ConnectionError::Websocket(e);
-                    tracing::error!(error = %err, "websocket send failed");
+                    tracing::error!(error = %err, "send failed");
                     self.listener.on_error(&err).await;
                     Err(err)
                 }
@@ -491,7 +491,7 @@ where
     }
 
     async fn close_stream(&mut self, code: CloseCode, reason: &str) -> Result<(), ConnectionError> {
-        tracing::info!(code = ?code, reason = %reason, "closing websocket stream");
+        tracing::info!(code = ?code, reason = %reason, "closing stream");
         self.listener.on_disconnecting(code.into(), reason).await;
         let ws_stream = self.ws_stream.as_mut().unwrap();
         let close_message = Message::close(Some(code), reason);
@@ -510,7 +510,7 @@ where
         };
         match tokio::time::timeout(self.config.disconnect_timeout(), handshake).await {
             Ok(Ok(())) => {
-                tracing::info!("websocket stream closed");
+                tracing::info!("stream closed");
                 Ok(())
             }
             Ok(Err(e)) => {
@@ -541,14 +541,14 @@ mod tests {
     #[derive(Debug)]
     struct TestListener;
     #[async_trait::async_trait]
-    impl crate::listener::MessageListenerTrait<TestMsg> for TestListener {
+    impl crate::listener::Listener<TestMsg> for TestListener {
         async fn on_message(&self, _message: TestMsg) {}
     }
 
-    fn make_config() -> (WebsocketConfig, MessageListener<TestMsg>) {
+    fn make_config() -> (Config, SharedListener<TestMsg>) {
         (
-            WebsocketConfig::new(),
-            Arc::new(TestListener) as MessageListener<TestMsg>,
+            Config::new(),
+            Arc::new(TestListener) as SharedListener<TestMsg>,
         )
     }
 

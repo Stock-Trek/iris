@@ -9,7 +9,7 @@ pub enum ServerCloseBehavior {
 }
 
 #[derive(Clone, Debug)]
-pub struct WebsocketConfig {
+pub struct Config {
     pub(crate) channel_buffer_size: usize,
     pub(crate) circuit_breaker: CircuitBreakerConfig,
     pub(crate) disconnect_timeout: Duration,
@@ -20,7 +20,7 @@ pub struct WebsocketConfig {
     pub(crate) tls_config: TlsConfig,
 }
 
-impl Default for WebsocketConfig {
+impl Default for Config {
     fn default() -> Self {
         Self {
             channel_buffer_size: 256,
@@ -35,7 +35,7 @@ impl Default for WebsocketConfig {
     }
 }
 
-impl WebsocketConfig {
+impl Config {
     pub fn new() -> Self {
         Self::default()
     }

@@ -10,7 +10,7 @@ struct IntegrationListener {
 }
 
 #[async_trait::async_trait]
-impl MessageListenerTrait<String> for IntegrationListener {
+impl Listener<String> for IntegrationListener {
     async fn on_connecting(&self) {
         self.events.send("on_connecting".into()).ok();
     }
@@ -102,7 +102,7 @@ async fn full_round_trip_send_and_receive_echo() {
         received_messages: msg_tx,
     };
 
-    let config = WebsocketConfig::new()
+    let config = Config::new()
         .with_circuit_breaker_config(
             CircuitBreakerConfig::new()
                 .with_initial_backoff(Duration::from_millis(50))
@@ -113,7 +113,7 @@ async fn full_round_trip_send_and_receive_echo() {
         .with_pong_timeout(Duration::from_secs(3600));
 
     let url = format!("ws://127.0.0.1:{}/ws", port);
-    let client = WebsocketClient::new(config, Arc::new(listener), &url);
+    let client = Client::new(config, Arc::new(listener), &url);
     client.connect().await.unwrap();
 
     // Wait for connection
@@ -165,7 +165,7 @@ async fn client_sends_multiple_messages() {
         received_messages: msg_tx,
     };
 
-    let config = WebsocketConfig::new()
+    let config = Config::new()
         .with_circuit_breaker_config(
             CircuitBreakerConfig::new()
                 .with_initial_backoff(Duration::from_millis(50))
@@ -176,7 +176,7 @@ async fn client_sends_multiple_messages() {
         .with_pong_timeout(Duration::from_secs(3600));
 
     let url = format!("ws://127.0.0.1:{}/ws", port);
-    let client = WebsocketClient::new(config, Arc::new(listener), &url);
+    let client = Client::new(config, Arc::new(listener), &url);
     client.connect().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -205,7 +205,7 @@ async fn is_connected_reflects_state() {
         received_messages: msg_tx,
     };
 
-    let config = WebsocketConfig::new()
+    let config = Config::new()
         .with_circuit_breaker_config(
             CircuitBreakerConfig::new()
                 .with_initial_backoff(Duration::from_millis(50))
@@ -216,7 +216,7 @@ async fn is_connected_reflects_state() {
         .with_pong_timeout(Duration::from_secs(3600));
 
     let url = format!("ws://127.0.0.1:{}/ws", port);
-    let client = WebsocketClient::new(config, Arc::new(listener), &url);
+    let client = Client::new(config, Arc::new(listener), &url);
     assert!(!client.is_connected());
 
     client.connect().await.unwrap();
@@ -272,7 +272,7 @@ async fn reconnect_after_server_restart() {
         received_messages: msg_tx,
     };
 
-    let config = WebsocketConfig::new()
+    let config = Config::new()
         .with_circuit_breaker_config(
             CircuitBreakerConfig::new()
                 .with_initial_backoff(Duration::from_millis(50))
@@ -284,7 +284,7 @@ async fn reconnect_after_server_restart() {
         .with_message_timeout(Duration::from_secs(3));
 
     let url = format!("ws://127.0.0.1:{}/ws", port);
-    let client = WebsocketClient::new(config, Arc::new(test_listener), &url);
+    let client = Client::new(config, Arc::new(test_listener), &url);
     client.connect().await.unwrap();
 
     // Wait for initial connection
@@ -352,7 +352,7 @@ async fn server_closes_connection_gracefully() {
         received_messages: msg_tx,
     };
 
-    let config = WebsocketConfig::new()
+    let config = Config::new()
         .with_circuit_breaker_config(
             CircuitBreakerConfig::new()
                 .with_initial_backoff(Duration::from_millis(50))
@@ -363,7 +363,7 @@ async fn server_closes_connection_gracefully() {
         .with_pong_timeout(Duration::from_secs(3600));
 
     let url = format!("ws://127.0.0.1:{}/ws", port);
-    let client = WebsocketClient::new(config, Arc::new(listener), &url);
+    let client = Client::new(config, Arc::new(listener), &url);
     client.connect().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -393,7 +393,7 @@ async fn connect_to_nonexistent_server_returns_error() {
             received_messages: _msg_tx,
         };
 
-        let config = WebsocketConfig::new()
+        let config = Config::new()
             .with_circuit_breaker_config(
                 CircuitBreakerConfig::new()
                     .with_initial_backoff(Duration::from_millis(50))
@@ -404,7 +404,7 @@ async fn connect_to_nonexistent_server_returns_error() {
             .with_pong_timeout(Duration::from_secs(3600));
 
         let url = format!("ws://127.0.0.1:{}/ws", port);
-        let client = WebsocketClient::new(config, Arc::new(test_listener), &url);
+        let client = Client::new(config, Arc::new(test_listener), &url);
         client.connect().await.unwrap();
 
         // Wait for at least one connection attempt and error
@@ -449,7 +449,7 @@ async fn large_payload_round_trip() {
         received_messages: msg_tx,
     };
 
-    let config = WebsocketConfig::new()
+    let config = Config::new()
         .with_circuit_breaker_config(
             CircuitBreakerConfig::new()
                 .with_initial_backoff(Duration::from_millis(50))
@@ -460,7 +460,7 @@ async fn large_payload_round_trip() {
         .with_pong_timeout(Duration::from_secs(3600));
 
     let url = format!("ws://127.0.0.1:{}/ws", port);
-    let client = WebsocketClient::new(config, Arc::new(listener), &url);
+    let client = Client::new(config, Arc::new(listener), &url);
     client.connect().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -490,7 +490,7 @@ async fn connect_disconnect_connect_again() {
         received_messages: msg_tx,
     };
 
-    let config = WebsocketConfig::new()
+    let config = Config::new()
         .with_circuit_breaker_config(
             CircuitBreakerConfig::new()
                 .with_initial_backoff(Duration::from_millis(50))
@@ -501,7 +501,7 @@ async fn connect_disconnect_connect_again() {
         .with_pong_timeout(Duration::from_secs(3600));
 
     let url = format!("ws://127.0.0.1:{}/ws", port);
-    let client = WebsocketClient::new(config, Arc::new(listener), &url);
+    let client = Client::new(config, Arc::new(listener), &url);
 
     // First connect
     client.connect().await.unwrap();
@@ -545,7 +545,7 @@ struct HangingListener {
 }
 
 #[async_trait::async_trait]
-impl MessageListenerTrait<String> for HangingListener {
+impl Listener<String> for HangingListener {
     async fn on_message(&self, _message: String) {
         self.entered.send(()).ok();
         // Never notified -> this callback never returns.
@@ -553,8 +553,8 @@ impl MessageListenerTrait<String> for HangingListener {
     }
 }
 
-fn stuck_config() -> WebsocketConfig {
-    WebsocketConfig::new()
+fn stuck_config() -> Config {
+    Config::new()
         .with_circuit_breaker_config(
             CircuitBreakerConfig::new()
                 .with_initial_backoff(Duration::from_millis(50))
@@ -578,7 +578,7 @@ async fn force_disconnect_on_active_connection() {
 
     let config = stuck_config();
     let url = format!("ws://127.0.0.1:{}/ws", port);
-    let client = WebsocketClient::new(config, Arc::new(listener), &url);
+    let client = Client::new(config, Arc::new(listener), &url);
     client.connect().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -602,7 +602,7 @@ async fn force_disconnect_when_handler_is_stuck() {
 
     let config = stuck_config();
     let url = format!("ws://127.0.0.1:{}/ws", port);
-    let client = WebsocketClient::new(config, Arc::new(listener), &url);
+    let client = Client::new(config, Arc::new(listener), &url);
     client.connect().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -635,7 +635,7 @@ async fn disconnect_escalates_to_force_when_graceful_is_stuck() {
     // A small disconnect timeout so the forced fallback kicks in quickly.
     let config = stuck_config().with_disconnect_timeout(Duration::from_millis(200));
     let url = format!("ws://127.0.0.1:{}/ws", port);
-    let client = WebsocketClient::new(config, Arc::new(listener), &url);
+    let client = Client::new(config, Arc::new(listener), &url);
     client.connect().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -680,7 +680,7 @@ async fn disconnect_during_connect_returns_promptly() {
     // for a long time; this test proves the connect phase is abortable.
     let config = stuck_config().with_disconnect_timeout(Duration::from_secs(60));
     let url = format!("ws://127.0.0.1:{}/ws", port);
-    let client = WebsocketClient::new(config, Arc::new(listener), &url);
+    let client = Client::new(config, Arc::new(listener), &url);
     client.connect().await.unwrap();
 
     // Let the client reach the connect phase and start hanging.

@@ -10,9 +10,9 @@ mod tls;
 
 pub use {
     circuit_breaker::CircuitBreakerConfig,
-    client::WebsocketClient,
-    config::{ServerCloseBehavior, WebsocketConfig},
+    client::Client,
+    config::{Config, ServerCloseBehavior},
     error::ConnectionError,
-    listener::{MessageListener, MessageListenerTrait},
+    listener::{Listener, SharedListener},
     tls::TlsConfig,
 };

@@ -1,6 +1,5 @@
 use crate::{
-    config::WebsocketConfig, error::ConnectionError, handler::ConnectionHandler,
-    listener::MessageListener,
+    config::Config, error::ConnectionError, handler::ConnectionHandler, listener::SharedListener,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::{
@@ -13,12 +12,12 @@ use tokio::{
 };
 
 #[derive(Debug)]
-pub struct WebsocketClient<T>
+pub struct Client<T>
 where
     T: Serialize + DeserializeOwned + Send + 'static,
 {
-    config: WebsocketConfig,
-    listener: MessageListener<T>,
+    config: Config,
+    listener: SharedListener<T>,
     url: String,
     state: Arc<RwLock<Option<ClientState<T>>>>,
 }
@@ -34,11 +33,11 @@ where
     connected: Arc<AtomicBool>,
 }
 
-impl<T> WebsocketClient<T>
+impl<T> Client<T>
 where
     T: Serialize + DeserializeOwned + Send + 'static,
 {
-    pub fn new(config: WebsocketConfig, listener: MessageListener<T>, url: &str) -> Self {
+    pub fn new(config: Config, listener: SharedListener<T>, url: &str) -> Self {
         Self {
             config,
             listener,
@@ -106,7 +105,7 @@ where
             .unwrap_or(false)
     }
 
-    /// Gracefully disconnects from the websocket server.
+    /// Gracefully disconnects from the server.
     ///
     /// A close frame is sent and the connection task is awaited. If the
     /// graceful close does not complete within the configured `disconnect_timeout`,
@@ -142,7 +141,7 @@ where
 
     /// Immediately aborts the connection task without sending a close frame.
     ///
-    /// Use this when [`WebsocketClient::disconnect`] does not work (for
+    /// Use this when [`Client::disconnect`] does not work (for
     /// example when the connection is stuck and the graceful close never
     /// completes). The underlying socket is dropped and the connection is torn
     /// down right away; note that listener callbacks such as `on_disconnected`
@@ -179,7 +178,7 @@ where
                 if join_err.is_cancelled() {
                     // The task was aborted by `force_disconnect` or by the
                     // forced fallback in `disconnect`; this is expected.
-                    tracing::info!("websocket connection task cancelled");
+                    tracing::info!("Connection task cancelled");
                     Ok(())
                 } else if join_err.is_panic() {
                     let panic_payload = join_err.into_panic();
@@ -188,7 +187,7 @@ where
                         .cloned()
                         .or_else(|| panic_payload.downcast_ref::<&str>().map(|s| s.to_string()))
                         .unwrap_or_else(|| "Unknown panic cause".to_string());
-                    tracing::error!("Websocket connection task panicked: {}", panic_msg);
+                    tracing::error!("Connection task panicked: {}", panic_msg);
                     Err(ConnectionError::TaskPanicked(panic_msg))
                 } else {
                     Err(ConnectionError::DisconnectionError(join_err))
@@ -211,7 +210,7 @@ mod tests {
     #[derive(Debug)]
     struct TestListener;
     #[async_trait::async_trait]
-    impl MessageListenerTrait<TestMsg> for TestListener {
+    impl Listener<TestMsg> for TestListener {
         async fn on_message(&self, _message: TestMsg) {}
     }
 
@@ -290,18 +289,18 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    fn client() -> WebsocketClient<TestMsg> {
-        let config = WebsocketConfig::new();
-        let listener: MessageListener<TestMsg> = Arc::new(TestListener);
-        WebsocketClient::new(config, listener, "ws://localhost:0")
+    fn client() -> Client<TestMsg> {
+        let config = Config::new();
+        let listener: SharedListener<TestMsg> = Arc::new(TestListener);
+        Client::new(config, listener, "ws://localhost:0")
     }
-    async fn connect(client: &mut WebsocketClient<TestMsg>) {
+    async fn connect(client: &mut Client<TestMsg>) {
         match client.connect().await {
             Ok(_) => {}
             _ => panic!("Client did not connect"),
         }
     }
-    async fn disconnect(client: &mut WebsocketClient<TestMsg>) {
+    async fn disconnect(client: &mut Client<TestMsg>) {
         match client.disconnect().await {
             Ok(_) => {}
             _ => panic!("Client did not disconnect"),

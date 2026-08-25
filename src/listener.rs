@@ -2,10 +2,10 @@ use crate::error::ConnectionError;
 use serde::{Serialize, de::DeserializeOwned};
 use std::{fmt::Debug, sync::Arc, time::Duration};
 
-pub type MessageListener<T> = Arc<dyn MessageListenerTrait<T>>;
+pub type SharedListener<T> = Arc<dyn Listener<T>>;
 
 #[async_trait::async_trait]
-pub trait MessageListenerTrait<T>: Debug + Send + Sync + 'static
+pub trait Listener<T>: Debug + Send + Sync + 'static
 where
     T: Serialize + DeserializeOwned + Send + 'static,
 {
