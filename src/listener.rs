@@ -1,20 +1,20 @@
 use crate::error::ConnectionError;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use std::{fmt::Debug, sync::Arc, time::Duration};
 
-pub type SharedListener<T> = Arc<dyn Listener<T>>;
+pub type SharedListener<Response> = Arc<dyn Listener<Response>>;
 
 #[async_trait::async_trait]
-pub trait Listener<T>: Debug + Send + Sync + 'static
+pub trait Listener<Response>: Debug + Send + Sync + 'static
 where
-    T: Serialize + DeserializeOwned + Send + 'static,
+    Response: DeserializeOwned + Send + 'static,
 {
     async fn on_connecting(&self) {}
     async fn on_connection_backoff(&self, _delay_millis: u64) {}
     async fn on_reconnecting(&self, _attempt: u32) {}
     async fn on_connected(&self) {}
     async fn on_ping_latency(&self, _rtt: Duration) {}
-    async fn on_message(&self, message: T);
+    async fn on_message(&self, message: Response);
     async fn on_message_size_received(&self, _size_bytes: usize) {}
     async fn on_message_size_sent(&self, _size_bytes: usize) {}
     async fn on_error(&self, _error: &ConnectionError) {}

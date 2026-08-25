@@ -216,7 +216,7 @@ async fn is_connected_reflects_state() {
         .with_pong_timeout(Duration::from_secs(3600));
 
     let url = format!("ws://127.0.0.1:{}/ws", port);
-    let client = Client::new(config, Arc::new(listener), &url);
+    let client: Client<String, String> = Client::new(config, Arc::new(listener), &url);
     assert!(!client.is_connected());
 
     client.connect().await.unwrap();
@@ -404,7 +404,7 @@ async fn connect_to_nonexistent_server_returns_error() {
             .with_pong_timeout(Duration::from_secs(3600));
 
         let url = format!("ws://127.0.0.1:{}/ws", port);
-        let client = Client::new(config, Arc::new(test_listener), &url);
+        let client: Client<String, String> = Client::new(config, Arc::new(test_listener), &url);
         client.connect().await.unwrap();
 
         // Wait for at least one connection attempt and error
@@ -578,7 +578,7 @@ async fn force_disconnect_on_active_connection() {
 
     let config = stuck_config();
     let url = format!("ws://127.0.0.1:{}/ws", port);
-    let client = Client::new(config, Arc::new(listener), &url);
+    let client: Client<String, String> = Client::new(config, Arc::new(listener), &url);
     client.connect().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -602,7 +602,7 @@ async fn force_disconnect_when_handler_is_stuck() {
 
     let config = stuck_config();
     let url = format!("ws://127.0.0.1:{}/ws", port);
-    let client = Client::new(config, Arc::new(listener), &url);
+    let client: Client<String, String> = Client::new(config, Arc::new(listener), &url);
     client.connect().await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -680,7 +680,7 @@ async fn disconnect_during_connect_returns_promptly() {
     // for a long time; this test proves the connect phase is abortable.
     let config = stuck_config().with_disconnect_timeout(Duration::from_secs(60));
     let url = format!("ws://127.0.0.1:{}/ws", port);
-    let client = Client::new(config, Arc::new(listener), &url);
+    let client: Client<String, String> = Client::new(config, Arc::new(listener), &url);
     client.connect().await.unwrap();
 
     // Let the client reach the connect phase and start hanging.

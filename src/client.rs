@@ -12,32 +12,34 @@ use tokio::{
 };
 
 #[derive(Debug)]
-pub struct Client<T>
+pub struct Client<Request, Response>
 where
-    T: Serialize + DeserializeOwned + Send + 'static,
+    Request: Serialize + Send + 'static,
+    Response: DeserializeOwned + Send + 'static,
 {
     config: Config,
-    listener: SharedListener<T>,
+    listener: SharedListener<Response>,
     url: String,
-    state: Arc<RwLock<Option<ClientState<T>>>>,
+    state: Arc<RwLock<Option<ClientState<Request>>>>,
 }
 
 #[derive(Debug)]
-struct ClientState<T>
+struct ClientState<Request>
 where
-    T: Serialize + DeserializeOwned + Send + 'static,
+    Request: Serialize + Send + 'static,
 {
-    message_sender: Sender<T>,
+    message_sender: Sender<Request>,
     disconnect_sender: Sender<()>,
     connection_task: JoinHandle<()>,
     connected: Arc<AtomicBool>,
 }
 
-impl<T> Client<T>
+impl<Request, Response> Client<Request, Response>
 where
-    T: Serialize + DeserializeOwned + Send + 'static,
+    Request: Serialize + Send + 'static,
+    Response: DeserializeOwned + Send + 'static,
 {
-    pub fn new(config: Config, listener: SharedListener<T>, url: &str) -> Self {
+    pub fn new(config: Config, listener: SharedListener<Response>, url: &str) -> Self {
         Self {
             config,
             listener,
@@ -54,7 +56,7 @@ where
         if guard.is_some() {
             return Ok(());
         }
-        let (message_sender, message_receiver) = channel::<T>(self.config.channel_buffer_size);
+        let (message_sender, message_receiver) = channel::<Request>(self.config.channel_buffer_size);
         let (disconnect_sender, disconnect_receiver) =
             channel::<()>(self.config.channel_buffer_size);
         let connected = Arc::new(AtomicBool::new(true));
@@ -78,7 +80,7 @@ where
         Ok(())
     }
 
-    pub async fn send(&self, message: T) -> Result<(), ConnectionError> {
+    pub async fn send(&self, message: Request) -> Result<(), ConnectionError> {
         let sender = {
             let guard = self
                 .state
@@ -289,18 +291,18 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    fn client() -> Client<TestMsg> {
+    fn client() -> Client<TestMsg, TestMsg> {
         let config = Config::new();
         let listener: SharedListener<TestMsg> = Arc::new(TestListener);
         Client::new(config, listener, "ws://localhost:0")
     }
-    async fn connect(client: &mut Client<TestMsg>) {
+    async fn connect(client: &mut Client<TestMsg, TestMsg>) {
         match client.connect().await {
             Ok(_) => {}
             _ => panic!("Client did not connect"),
         }
     }
-    async fn disconnect(client: &mut Client<TestMsg>) {
+    async fn disconnect(client: &mut Client<TestMsg, TestMsg>) {
         match client.disconnect().await {
             Ok(_) => {}
             _ => panic!("Client did not disconnect"),

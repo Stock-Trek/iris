@@ -23,14 +23,15 @@ use tokio_websockets::{
 use tracing::{Span, info_span};
 
 #[derive(Debug)]
-pub(crate) struct ConnectionHandler<T>
+pub(crate) struct ConnectionHandler<Request, Response>
 where
-    T: Serialize + DeserializeOwned + Send + 'static,
+    Request: Serialize + Send + 'static,
+    Response: DeserializeOwned + Send + 'static,
 {
     url: String,
     config: Config,
-    listener: SharedListener<T>,
-    message_receiver: Receiver<T>,
+    listener: SharedListener<Response>,
+    message_receiver: Receiver<Request>,
     disconnect_receiver: Receiver<()>,
     connected: Arc<AtomicBool>,
     pong_deadline: Option<tokio::time::Instant>,
@@ -42,15 +43,16 @@ where
     span: Span,
 }
 
-impl<T> ConnectionHandler<T>
+impl<Request, Response> ConnectionHandler<Request, Response>
 where
-    T: Serialize + DeserializeOwned + Send + 'static,
+    Request: Serialize + Send + 'static,
+    Response: DeserializeOwned + Send + 'static,
 {
     pub(crate) fn new(
         url: &str,
         config: Config,
-        listener: SharedListener<T>,
-        message_receiver: Receiver<T>,
+        listener: SharedListener<Response>,
+        message_receiver: Receiver<Request>,
         disconnect_receiver: Receiver<()>,
         connected: Arc<AtomicBool>,
     ) -> Self {
@@ -426,7 +428,7 @@ where
         Ok(())
     }
 
-    fn parse_message(&self, message: Message) -> Result<(T, usize), ConnectionError> {
+    fn parse_message(&self, message: Message) -> Result<(Response, usize), ConnectionError> {
         if message.is_text() {
             if let Some(text) = message.as_text() {
                 let message = serde_json::from_str(text).map_err(|e| {
@@ -451,7 +453,7 @@ where
         Err(ConnectionError::BadMessagePayload)
     }
 
-    async fn send_message(&mut self, message: T) -> Result<(), ConnectionError> {
+    async fn send_message(&mut self, message: Request) -> Result<(), ConnectionError> {
         let payload = match serde_json::to_vec(&message) {
             Ok(p) => p,
             Err(e) => {
@@ -558,7 +560,7 @@ mod tests {
         let config = config.with_circuit_breaker_config(
             CircuitBreakerConfig::new().with_max_reconnect_attempts(5),
         );
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel(10);
+        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestMsg>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let mut handler = ConnectionHandler::new(
@@ -583,7 +585,7 @@ mod tests {
         let (config, listener) = make_config();
         let config = config
             .with_circuit_breaker_config(CircuitBreakerConfig::new().with_no_reconnect_limit());
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel(10);
+        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestMsg>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let mut handler = ConnectionHandler::new(
@@ -601,7 +603,7 @@ mod tests {
     #[test]
     fn parse_valid_text_message() {
         let (config, listener) = make_config();
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel(10);
+        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestMsg>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let handler = ConnectionHandler::new(
@@ -629,7 +631,7 @@ mod tests {
     #[test]
     fn parse_valid_binary_message() {
         let (config, listener) = make_config();
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel(10);
+        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestMsg>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let handler = ConnectionHandler::new(
@@ -657,7 +659,7 @@ mod tests {
     #[test]
     fn parse_invalid_json_text_returns_error() {
         let (config, listener) = make_config();
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel(10);
+        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestMsg>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let handler = ConnectionHandler::new(
@@ -680,7 +682,7 @@ mod tests {
     #[test]
     fn parse_invalid_json_binary_returns_error() {
         let (config, listener) = make_config();
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel(10);
+        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestMsg>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let handler = ConnectionHandler::new(
@@ -703,7 +705,7 @@ mod tests {
     #[test]
     fn parse_unsupported_message_type_returns_bad_message_payload() {
         let (config, listener) = make_config();
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel(10);
+        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestMsg>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let handler = ConnectionHandler::new(
@@ -726,7 +728,7 @@ mod tests {
     #[test]
     fn parse_message_size_matches_payload() {
         let (config, listener) = make_config();
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel(10);
+        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestMsg>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let handler = ConnectionHandler::new(
@@ -751,7 +753,7 @@ mod tests {
                 .with_initial_backoff(Duration::from_secs(1))
                 .with_max_backoff(Duration::from_secs(10)),
         );
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel(10);
+        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestMsg>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let mut handler = ConnectionHandler::new(
