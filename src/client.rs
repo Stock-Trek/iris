@@ -81,17 +81,27 @@ where
         Ok(())
     }
 
+    /// Sends a message to the server.
+    ///
+    /// Fails fast with [`ConnectionError::ConnectionClosed`] whenever
+    /// [`Client::is_connected`] is `false` (i.e. the client has never been
+    /// connected, has been disconnected, or the connection is currently down
+    /// while reconnecting), so messages are never buffered while the outbound
+    /// channel is not actively connected.
     pub async fn send(&self, message: Request) -> Result<(), ConnectionError> {
-        let sender = {
+        let (sender, connected) = {
             let guard = self
                 .state
                 .read()
                 .map_err(|_| ConnectionError::InternalState)?;
             match &*guard {
                 None => return Err(ConnectionError::ConnectionClosed),
-                Some(state) => state.message_sender.clone(),
+                Some(state) => (state.message_sender.clone(), state.connected.clone()),
             }
         };
+        if !connected.load(Ordering::Relaxed) {
+            return Err(ConnectionError::ConnectionClosed);
+        }
         sender
             .send(message)
             .await
@@ -204,6 +214,7 @@ where
 mod tests {
     use crate::*;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
 
     #[derive(serde::Serialize, Debug, Clone, PartialEq)]
     struct TestRequest {
@@ -267,6 +278,33 @@ mod tests {
             })
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn send_message_fails_fast_when_connected_flag_is_false() {
+        let mut client = client();
+        connect(&mut client).await;
+        // State exists (connect was called) but the connection is down, e.g.
+        // while the handler is reconnecting. `send` must fail fast and must
+        // not buffer the message in the outbound channel.
+        {
+            let guard = client.state.read().unwrap();
+            guard
+                .as_ref()
+                .unwrap()
+                .connected
+                .store(false, Ordering::Relaxed);
+        }
+        let result = client
+            .send(TestRequest {
+                value: "test".to_string(),
+            })
+            .await;
+        match result {
+            Err(ConnectionError::ConnectionClosed) => {}
+            other => panic!("expected ConnectionClosed, got: {:?}", other.map(|_| ())),
+        }
+        disconnect(&mut client).await;
     }
 
     #[tokio::test]
