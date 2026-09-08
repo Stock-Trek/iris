@@ -9,10 +9,10 @@ pub enum ServerCloseBehavior {
 }
 
 #[derive(Clone, Debug, Default)]
-pub enum DisconnectQueueBehavior {
-    DropQueuedOutboundMessages,
+pub enum DisconnectedBehavior {
+    DropAllQueued,
     #[default]
-    SendQueuedOutboundMessagesWhenReconnected,
+    SendOnReconnect,
 }
 
 #[derive(Clone, Debug)]
@@ -20,7 +20,7 @@ pub struct Config {
     pub(crate) channel_buffer_size: usize,
     pub(crate) circuit_breaker: CircuitBreakerConfig,
     pub(crate) disconnect_timeout: Duration,
-    pub(crate) disconnect_queue_behavior: DisconnectQueueBehavior,
+    pub(crate) disconnect_queue_behavior: DisconnectedBehavior,
     pub(crate) message_timeout: Duration,
     pub(crate) ping_interval: Duration,
     pub(crate) pong_timeout: Duration,
@@ -34,7 +34,7 @@ impl Default for Config {
             channel_buffer_size: 256,
             circuit_breaker: CircuitBreakerConfig::default(),
             disconnect_timeout: Duration::from_secs(10),
-            disconnect_queue_behavior: DisconnectQueueBehavior::default(),
+            disconnect_queue_behavior: DisconnectedBehavior::default(),
             message_timeout: Duration::from_secs(10),
             ping_interval: Duration::from_secs(30),
             pong_timeout: Duration::from_secs(30),
@@ -64,7 +64,7 @@ impl Config {
         self.disconnect_timeout = disconnect_timeout;
         self
     }
-    pub fn with_disconnect_queue_behavior(mut self, behavior: DisconnectQueueBehavior) -> Self {
+    pub fn with_disconnect_queue_behavior(mut self, behavior: DisconnectedBehavior) -> Self {
         self.disconnect_queue_behavior = behavior;
         self
     }
@@ -95,7 +95,7 @@ impl Config {
     pub(crate) fn disconnect_timeout(&self) -> Duration {
         self.disconnect_timeout
     }
-    pub(crate) fn disconnect_queue_behavior(&self) -> &DisconnectQueueBehavior {
+    pub(crate) fn disconnect_queue_behavior(&self) -> &DisconnectedBehavior {
         &self.disconnect_queue_behavior
     }
     pub(crate) fn message_timeout(&self) -> Duration {

@@ -12,7 +12,7 @@ mod tls;
 pub use {
     circuit_breaker::CircuitBreakerConfig,
     client::Client,
-    config::{Config, DisconnectQueueBehavior, ServerCloseBehavior},
+    config::{Config, DisconnectedBehavior, ServerCloseBehavior},
     error::ConnectionError,
     listener::{Listener, SharedListener},
     tls::TlsConfig,

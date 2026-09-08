@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, DisconnectQueueBehavior, ServerCloseBehavior},
+    config::{Config, DisconnectedBehavior, ServerCloseBehavior},
     error::ConnectionError,
     listener::SharedListener,
     outbound_message::OutboundMessage,
@@ -249,9 +249,9 @@ where
     }
 
     fn drop_queued_outbound_messages_if_configured(&mut self) {
-        if !matches!(
+        if matches!(
             self.config.disconnect_queue_behavior(),
-            DisconnectQueueBehavior::DropQueuedOutboundMessages
+            DisconnectedBehavior::SendOnReconnect
         ) {
             return;
         }

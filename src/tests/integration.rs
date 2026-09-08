@@ -754,7 +754,7 @@ async fn drop_queued_outbound_messages_on_disconnect() {
         )
         .with_ping_interval(Duration::from_secs(3600))
         .with_pong_timeout(Duration::from_secs(3600))
-        .with_disconnect_queue_behavior(DisconnectQueueBehavior::DropQueuedOutboundMessages);
+        .with_disconnect_queue_behavior(DisconnectedBehavior::DropAllQueued);
 
     let url = format!("ws://127.0.0.1:{}/ws", port);
     let client: Arc<Client<String, String>> =
