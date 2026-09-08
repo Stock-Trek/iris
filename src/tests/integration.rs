@@ -1,6 +1,14 @@
 use crate::*;
-use std::{sync::Arc, time::Duration};
+use futures::SinkExt;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
 use tokio_websockets::{Message, ServerBuilder};
 
 #[derive(Debug)]
@@ -652,6 +660,196 @@ async fn disconnect_escalates_to_force_when_graceful_is_stuck() {
     let result = tokio::time::timeout(Duration::from_secs(3), client.disconnect()).await;
     assert!(result.is_ok(), "disconnect should escalate and return");
     assert!(!client.is_connected());
+}
+
+#[derive(Debug)]
+struct HangFirstMessageListener {
+    entered: mpsc::UnboundedSender<()>,
+    hang: Arc<tokio::sync::Notify>,
+    first_message_pending: AtomicBool,
+    received_messages: mpsc::UnboundedSender<String>,
+}
+
+#[async_trait::async_trait]
+impl Listener<String> for HangFirstMessageListener {
+    async fn on_message(&self, message: String) {
+        self.received_messages.send(message).ok();
+        if self.first_message_pending.swap(false, Ordering::SeqCst) {
+            self.entered.send(()).ok();
+            self.hang.notified().await;
+        }
+    }
+}
+
+async fn run_closable_trigger_server() -> (u16, Arc<tokio::sync::Notify>) {
+    let close_trigger = Arc::new(tokio::sync::Notify::new());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind");
+    let port = listener.local_addr().unwrap().port();
+    let trigger = close_trigger.clone();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let trigger = trigger.clone();
+            tokio::spawn(async move {
+                let builder = ServerBuilder::new();
+                if let Ok((_request, mut ws_stream)) = builder.accept(stream).await {
+                    let _ = ws_stream
+                        .send(Message::text(serde_json::to_string("trigger").unwrap()))
+                        .await;
+                    loop {
+                        tokio::select! {
+                            _ = trigger.notified() => break,
+                            next = ws_stream.next() => match next {
+                                Some(Ok(msg)) => {
+                                    if msg.is_text() || msg.is_binary() {
+                                        let _ = ws_stream.send(msg).await;
+                                    } else if msg.is_close() {
+                                        break;
+                                    }
+                                }
+                                _ => break,
+                            },
+                        }
+                    }
+                }
+            });
+        }
+    });
+    (port, close_trigger)
+}
+
+async fn hang_handler_on_first_message(
+    client: &Client<String, String>,
+    entered_rx: &mut mpsc::UnboundedReceiver<()>,
+) {
+    client.connect().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered_rx.recv())
+        .await
+        .expect("handler never entered on_message")
+        .expect("entered channel closed");
+}
+
+#[tokio::test]
+async fn drop_queued_outbound_messages_on_disconnect() {
+    let (port, close_trigger) = run_closable_trigger_server().await;
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let (received_tx, mut received_rx) = mpsc::unbounded_channel();
+    let hang = Arc::new(tokio::sync::Notify::new());
+
+    let listener = HangFirstMessageListener {
+        entered: entered_tx,
+        hang: hang.clone(),
+        first_message_pending: AtomicBool::new(true),
+        received_messages: received_tx,
+    };
+
+    let config = Config::new()
+        .with_circuit_breaker_config(
+            CircuitBreakerConfig::new()
+                .with_initial_backoff(Duration::from_millis(50))
+                .with_max_backoff(Duration::from_millis(200))
+                .with_max_reconnect_attempts(10),
+        )
+        .with_ping_interval(Duration::from_secs(3600))
+        .with_pong_timeout(Duration::from_secs(3600))
+        .with_disconnect_queue_behavior(DisconnectedBehavior::DropAllQueued);
+
+    let url = format!("ws://127.0.0.1:{}/ws", port);
+    let client: Arc<Client<String, String>> =
+        Arc::new(Client::new(config, Arc::new(listener), &url));
+    hang_handler_on_first_message(&client, &mut entered_rx).await;
+
+    let sender = client.clone();
+    let send_task = tokio::spawn(async move { sender.send("queued".to_string()).await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    close_trigger.notify_one();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    hang.notify_one();
+
+    let result = tokio::time::timeout(Duration::from_secs(5), send_task)
+        .await
+        .expect("send did not resolve after disconnect")
+        .unwrap();
+    match result {
+        Err(ConnectionError::ConnectionClosed) => {}
+        other => panic!("expected ConnectionClosed, got: {:?}", other.map(|_| ())),
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut saw_queued = false;
+    while let Ok(msg) = received_rx.try_recv() {
+        if msg == "queued" {
+            saw_queued = true;
+        }
+    }
+    assert!(!saw_queued, "dropped message must not reach the server");
+
+    client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn send_queued_outbound_messages_when_reconnected() {
+    let (port, close_trigger) = run_closable_trigger_server().await;
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let (received_tx, mut received_rx) = mpsc::unbounded_channel();
+    let hang = Arc::new(tokio::sync::Notify::new());
+
+    let listener = HangFirstMessageListener {
+        entered: entered_tx,
+        hang: hang.clone(),
+        first_message_pending: AtomicBool::new(true),
+        received_messages: received_tx,
+    };
+
+    let config = Config::new()
+        .with_circuit_breaker_config(
+            CircuitBreakerConfig::new()
+                .with_initial_backoff(Duration::from_millis(50))
+                .with_max_backoff(Duration::from_millis(200))
+                .with_max_reconnect_attempts(10),
+        )
+        .with_ping_interval(Duration::from_secs(3600))
+        .with_pong_timeout(Duration::from_secs(3600));
+
+    let url = format!("ws://127.0.0.1:{}/ws", port);
+    let client: Arc<Client<String, String>> =
+        Arc::new(Client::new(config, Arc::new(listener), &url));
+    hang_handler_on_first_message(&client, &mut entered_rx).await;
+
+    let sender = client.clone();
+    let send_task = tokio::spawn(async move { sender.send("queued".to_string()).await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    close_trigger.notify_one();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    hang.notify_one();
+
+    let result = tokio::time::timeout(Duration::from_secs(10), send_task)
+        .await
+        .expect("send did not resolve after reconnect")
+        .unwrap();
+    assert!(
+        result.is_ok(),
+        "queued message should be written after reconnect, got: {:?}",
+        result
+    );
+
+    let echoed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let msg = received_rx.recv().await.expect("received channel closed");
+            if msg == "queued" {
+                return msg;
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for queued message echo");
+    assert_eq!(echoed, "queued");
+
+    client.disconnect().await.unwrap();
 }
 
 #[tokio::test]
