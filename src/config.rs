@@ -1,10 +1,51 @@
 use crate::{circuit_breaker::CircuitBreakerConfig, tls::TlsConfig};
 use std::time::Duration;
 
+/// Controls how the client reacts when the server closes the connection
+/// cleanly (i.e. when the server sends a WebSocket close frame).
+///
+/// This setting only affects clean, server-initiated closes. Any other kind of
+/// connection loss - a network error, an unexpected end of stream, a pong
+/// timeout, a failed socket write and so on - goes through the reconnect and
+/// back-off machinery regardless of the selected variant (unless the error is
+/// permanent, see [`crate::ConnectionError::is_permanent`]).
+///
+/// See [`crate::Client::send`] for what happens to messages that were accepted
+/// by `send` but had not been written to the socket yet when the connection
+/// dropped.
 #[derive(Clone, Debug, Default)]
 pub enum ServerCloseBehavior {
+    /// Do not reconnect after the server closes the connection.
+    ///
+    /// The connection task terminates as soon as the server-initiated close is
+    /// processed, so the client does not attempt to reconnect on its own.
+    /// Messages that were accepted by [`crate::Client::send`] but had not yet
+    /// been written to the socket when the close arrived are dropped together
+    /// with the connection and are never delivered; the `send` call that
+    /// accepted them already returned `Ok(())`, so no error is surfaced for
+    /// them.
+    ///
+    /// The client stays disconnected: [`crate::Client::is_connected`] returns
+    /// `false` and subsequent [`crate::Client::send`] calls fail fast with
+    /// [`crate::ConnectionError::ConnectionClosed`] instead of being buffered.
     #[default]
     Disconnect,
+    /// Automatically reconnect after the server closes the connection.
+    ///
+    /// After a clean server-initiated close the client backs off (honouring
+    /// the circuit breaker configuration) and attempts to reconnect. Messages
+    /// that were accepted by [`crate::Client::send`] but had not yet been
+    /// written to the socket when the close arrived are held in the outbound
+    /// queue while the client is offline and are sent, in order, on the new
+    /// connection once it is established.
+    ///
+    /// [`crate::Client::send`] calls made while the client is offline still
+    /// fail fast with [`crate::ConnectionError::ConnectionClosed`]; only
+    /// messages that were queued before the connection dropped are retained.
+    /// If the connection task ends before a reconnect succeeds (for example
+    /// because [`crate::Client::disconnect`] or
+    /// [`crate::Client::force_disconnect`] is called), the queued messages are
+    /// dropped.
     Reconnect,
 }
 
@@ -67,6 +108,12 @@ impl Config {
         self.pong_timeout = pong_timeout;
         self
     }
+    /// Sets how the client reacts when the server closes the connection
+    /// cleanly.
+    ///
+    /// See [`ServerCloseBehavior`] for the difference between the two variants,
+    /// including what happens to messages that were queued but not yet sent
+    /// when the connection dropped.
     pub fn with_server_close_behavior(mut self, behavior: ServerCloseBehavior) -> Self {
         self.server_close_behavior = behavior;
         self

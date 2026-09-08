@@ -83,11 +83,46 @@ where
 
     /// Sends a message to the server.
     ///
-    /// Fails fast with [`ConnectionError::ConnectionClosed`] whenever
-    /// [`Client::is_connected`] is `false` (i.e. the client has never been
-    /// connected, has been disconnected, or the connection is currently down
-    /// while reconnecting), so messages are never buffered while the outbound
-    /// channel is not actively connected.
+    /// The message is serialised and written to the socket by the background
+    /// connection task. This method returns `Ok(())` once the message has been
+    /// accepted into the client's internal outbound queue (a bounded channel,
+    /// see [`Config::with_channel_buffer_size`]) while the connection was
+    /// active. It does **not** mean the message has been delivered: it may
+    /// still be queued, or in the middle of being written to the socket, when
+    /// the connection drops.
+    ///
+    /// ## What happens to accepted messages when the connection drops
+    ///
+    /// * Messages that have already been handed to the socket are never
+    ///   retransmitted. The client does not track whether the server actually
+    ///   received them, so they may be lost if the connection drops.
+    /// * Messages that were accepted but not yet written are kept in the
+    ///   outbound queue and forwarded in the order they were accepted. Whether
+    ///   they survive the drop depends on how the connection was lost:
+    ///   * If the server closed the connection cleanly, the
+    ///     [`crate::config::ServerCloseBehavior`] setting decides:
+    ///     * [`crate::config::ServerCloseBehavior::Disconnect`] (the default):
+    ///       the connection task terminates and any still-queued messages are
+    ///       dropped; they are never sent and no error is surfaced for them.
+    ///     * [`crate::config::ServerCloseBehavior::Reconnect`] - the queued
+    ///       messages are held while the client backs off and reconnects, and
+    ///       are sent on the new connection once it is established.
+    ///   * For any other connection loss (network error, unexpected end of
+    ///     stream, pong timeout, ...) the client reconnects automatically,
+    ///     unless the error is permanent (see
+    ///     [`ConnectionError::is_permanent`]), and queued messages are held
+    ///     and sent once the connection is back. A message whose own socket
+    ///     write failed is dropped, never retried.
+    ///
+    /// While the connection is down - including during reconnect back-off -
+    /// this method fails fast with [`ConnectionError::ConnectionClosed`] and
+    /// does not buffer the message, so callers that need delivery guarantees
+    /// must wait until [`Client::is_connected`] is `true` again and resend. If
+    /// the connection task ends before a queued message could be written
+    /// (clean server close with
+    /// [`crate::config::ServerCloseBehavior::Disconnect`], a permanent error,
+    /// or a call to [`Client::disconnect`] or
+    /// [`Client::force_disconnect`]), the messages still queued are dropped.
     pub async fn send(&self, message: Request) -> Result<(), ConnectionError> {
         let (sender, connected) = {
             let guard = self
