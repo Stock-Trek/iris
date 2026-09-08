@@ -117,11 +117,6 @@ where
             .map_err(|e| ConnectionError::SendMessage(format!("{:?}", e)))?;
         match ack_receiver.await {
             Ok(result) => result,
-            // The connection task ended (e.g. `disconnect`/`force_disconnect`,
-            // a clean server close with
-            // [`crate::config::ServerCloseBehavior::Disconnect`], or a
-            // permanent error) before the message could be written to the
-            // socket. The message was dropped without ever being sent.
             Err(_) => Err(ConnectionError::ConnectionClosed),
         }
     }
