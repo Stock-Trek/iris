@@ -1,0 +1,62 @@
+name: "Set up pi models"
+description: "Configure pi to connect to the DeepSeek and Eden AI providers"
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@v2
+
+    - name: Install pi-coding-agent and json-schema extension
+      shell: bash
+      run: |
+        bun install -g @earendil-works/pi-coding-agent
+        pi install npm:@nqbao/pi-json-schema
+
+    - name: Configure custom providers and models
+      shell: bash
+      env:
+        DEEPSEEK_API_KEY: ${{ env.DEEPSEEK_API_KEY }}
+        EDENAI_API_KEY: ${{ env.EDENAI_API_KEY }}
+      run: |
+        if [ -z "${DEEPSEEK_API_KEY}" ]; then
+          echo "Error: DeepSeek API key is not set. Check the Infisical project configuration." >&2
+          exit 1
+        fi
+        if [ -z "${EDENAI_API_KEY}" ]; then
+          echo "Error: Eden AI API key is not set. Check the Infisical project configuration." >&2
+          exit 1
+        fi
+        mkdir -p ~/.pi/agent
+        # Each model declares the full "id" pi needs to make API calls plus a
+        # short "key" that users can type after "@model = ..." in place of the
+        # (sometimes very long) id, e.g. "@model = \"glm\"" instead of the full
+        # fireworks path below. Keys must be unique across all providers.
+        jq -n \
+          --arg deepseekBaseUrl "https://api.deepseek.com/v1" \
+          --arg deepseekApi "openai-completions" \
+          --arg deepseekApiKey "${DEEPSEEK_API_KEY}" \
+          --arg edenBaseUrl "https://api.edenai.run/v3" \
+          --arg edenApi "openai-completions" \
+          --arg edenApiKey "${EDENAI_API_KEY}" \
+          '{
+            "providers": {
+              "deepseek": {
+                "baseUrl": $deepseekBaseUrl,
+                "api": $deepseekApi,
+                "apiKey": $deepseekApiKey,
+                "models": [
+                  { "id": "deepseek-v4-flash", "key": "flash" },
+                  { "id": "deepseek-v4-pro", "key": "pro" }
+                ]
+              },
+              "eden": {
+                "baseUrl": $edenBaseUrl,
+                "api": $edenApi,
+                "apiKey": $edenApiKey,
+                "models": [
+                  { "id": "fireworks_ai/accounts/fireworks/models/glm-5p3-flash", "key": "glm" },
+                  { "id": "deepinfra/tencent/Hy3", "key": "hy3" }
+                ]
+              }
+            }
+          }' > ~/.pi/agent/models.json

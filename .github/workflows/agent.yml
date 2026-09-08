@@ -38,6 +38,8 @@ jobs:
       response-classification-base64: ${{ steps.schemas.outputs.response-classification-base64 }}
       issue-context-base64: ${{ steps.gather-context.outputs.context-base64 }}
       request-type: ${{ steps.save-request-type.outputs.request-type }}
+      provider: ${{ steps.save-model.outputs.provider }}
+      model: ${{ steps.save-model.outputs.model }}
     steps:
       - name: Infisical
         uses: Infisical/secrets-action@v1.0.16
@@ -125,27 +127,94 @@ jobs:
             )) {
               comments.push(...response.data);
             }
+            // Strip @agent and @model = "model-id" tags
+            const stripTags = (text) => (text || '')
+              .replace(/@model\s*=\s*["'][^"']+["']/g, '')
+              .replace(/@agent\b/g, '')
+              .replace(/\n{3,}/g, '\n\n')
+              .trim();
             // Only send the most recent comments to the model: the full history
             // of a long-lived issue can be huge (cost, tokens and job output
             // size), and older comments are rarely relevant.
             const history = comments.slice(-50).map(comment => ({
               author: comment.user.login,
               date: comment.created_at,
-              body: comment.body,
+              body: stripTags(comment.body),
             }));
             const issueContext = {
-              title: issue.title,
-              body: issue.body,
+              title: stripTags(issue.title),
+              body: stripTags(issue.body),
               history
             };
             const stringified = JSON.stringify(issueContext);
             const context_base64 = Buffer.from(stringified).toString('base64');
             core.setOutput('context-base64', context_base64);
 
-      - name: Set up DeepSeek via pi
-        uses: ./.github/actions/set-up-deepseek-via-pi
+      - name: Set up pi models
+        uses: ./.github/actions/set-up-pi-models
         env:
           DEEPSEEK_API_KEY: ${{ env.DEEPSEEK_API_KEY }}
+          EDENAI_API_KEY: ${{ env.EDENAI_API_KEY }}
+
+      - name: Save selected model
+        id: save-model
+        uses: actions/github-script@v9
+        with:
+          script: |
+            // A model can be named by: [full id, short key, any unambiguous suffix of its id]
+            // Matching is case-insensitive
+            const fs = require('fs');
+            const os = require('os');
+            const path = require('path');
+
+            let text = '';
+            if (context.eventName === 'issue_comment') {
+              text = (context.payload.comment && context.payload.comment.body) || '';
+            } else {
+              const issue = context.payload.issue || {};
+              text = `${issue.title || ''}\n${issue.body || ''}`;
+            }
+            const match = text.match(/@model\s*=\s*["']([^"']+)["']/);
+            const requested = match ? match[1].trim() : '';
+
+            const DEFAULT_PROVIDER = 'deepseek';
+            const DEFAULT_MODEL = 'deepseek-v4-flash';
+            let provider = DEFAULT_PROVIDER;
+            let model = DEFAULT_MODEL;
+
+            if (requested) {
+              const modelsPath = path.join(os.homedir(), '.pi', 'agent', 'models.json');
+              if (fs.existsSync(modelsPath)) {
+                const configured = JSON.parse(fs.readFileSync(modelsPath, 'utf8')).providers || {};
+                const models = [];
+                for (const [name, config] of Object.entries(configured)) {
+                  for (const entry of (config && config.models) || []) {
+                    if (entry && entry.id) {
+                      models.push({ provider: name, id: entry.id, key: (entry.key || '').toLowerCase() });
+                    }
+                  }
+                }
+                const requestedLower = requested.toLowerCase();
+                // Try, in order: exact full id, exact short key, unique suffix of full id
+                // Only resolves when it matches exactly one model, default is deepseek-v4-flash
+                const findMatch = (criteria) => {
+                  const hits = models.filter(criteria);
+                  return hits.length === 1 ? hits[0] : null;
+                };
+                const selected =
+                  findMatch(m => m.id.toLowerCase() === requestedLower) ||
+                  findMatch(m => m.key && m.key === requestedLower) ||
+                  findMatch(m => m.id.toLowerCase().endsWith(requestedLower));
+                if (selected) {
+                  provider = selected.provider;
+                  model = selected.id;
+                }
+              }
+            }
+            console.log(`Requested model: ${requested || '(none, using default)'}`);
+            console.log(`Using provider: ${provider}, model: ${model}`);
+            core.setOutput('provider', provider);
+            core.setOutput('model', model);
 
       - name: Classify request
         id: classify-request
@@ -154,6 +223,8 @@ jobs:
           context-base64: ${{ steps.gather-context.outputs.context-base64 }}
           prompt-base64: ${{ steps.prompts.outputs.classify-request-base64 }}
           schema-base64: ${{ steps.schemas.outputs.request-classification-base64 }}
+          provider: ${{ steps.save-model.outputs.provider }}
+          model: ${{ steps.save-model.outputs.model }}
 
       - name: Save request type
         id: save-request-type
@@ -302,10 +373,11 @@ jobs:
           base: ${{ needs.triage.outputs.issue-branch-base }}
           create-if-not-exists: false
 
-      - name: Set up DeepSeek via pi
-        uses: ./.github/actions/set-up-deepseek-via-pi
+      - name: Set up pi models
+        uses: ./.github/actions/set-up-pi-models
         env:
           DEEPSEEK_API_KEY: ${{ env.DEEPSEEK_API_KEY }}
+          EDENAI_API_KEY: ${{ env.EDENAI_API_KEY }}
 
       - name: Classify response
         id: classify-response
@@ -314,6 +386,8 @@ jobs:
           context-base64: ${{ needs.triage.outputs.issue-context-base64 }}
           prompt-base64: ${{ needs.triage.outputs.classify-response-base64 }}
           schema-base64: ${{ needs.triage.outputs.response-classification-base64 }}
+          provider: ${{ needs.triage.outputs.provider }}
+          model: ${{ needs.triage.outputs.model }}
       - name: Save response type
         id: save-response-type
         run: |
@@ -336,6 +410,8 @@ jobs:
           context-base64: ${{ needs.triage.outputs.issue-context-base64 }}
           prompt-base64: ${{ needs.triage.outputs.extra-information-required-base64 }}
           schema-base64: ${{ needs.triage.outputs.information-list-base64 }}
+          provider: ${{ needs.triage.outputs.provider }}
+          model: ${{ needs.triage.outputs.model }}
       - name: Save extra information required
         id: save-extra-information-required
         if: steps.save-response-type.outputs.response-type == 'REQUIRES_MORE_INFORMATION'
@@ -454,6 +530,10 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           echo "${{ env.SHIPYARD_KNOWN_HOST }}" >> ~/.ssh/known_hosts
           ssh -T git@ssh.shipyard.rs
+      - name: Configure git identity
+        run: |
+          git config --global user.email "agent@stock-trek.com"
+          git config --global user.name "Stock-Trek Agent"
       - name: Address issue
         id: address-issue
         if: steps.save-response-type.outputs.response-type == 'CAN_ADDRESS_FULLY'
@@ -461,6 +541,8 @@ jobs:
         with:
           context-base64: ${{ needs.triage.outputs.issue-context-base64 }}
           prompt-base64: ${{ needs.triage.outputs.address-issue-base64 }}
+          provider: ${{ needs.triage.outputs.provider }}
+          model: ${{ needs.triage.outputs.model }}
       - name: Save address response
         id: save-address-issue-summary
         if: steps.save-response-type.outputs.response-type == 'CAN_ADDRESS_FULLY'
@@ -515,13 +597,30 @@ jobs:
       - name: Commit and push code changes
         if: (steps.save-response-type.outputs.response-type == 'CAN_ADDRESS_FULLY') && (steps.check-for-code-changes.outputs.has-changes == 'true')
         run: |
-          git config --global user.email "agent@stock-trek.com"
-          git config --global user.name "Stock-Trek Agent"
+          # The agent may have switched branches or rebased while addressing the
+          # issue; make sure the changes are committed on (and pushed to) the
+          # issue branch rather than whatever branch we are on now.
+          ISSUE_BRANCH="${{ needs.triage.outputs.issue-branch }}"
+          if [ "$(git rev-parse --abbrev-ref HEAD)" != "${ISSUE_BRANCH}" ]; then
+            if git rev-parse --verify --quiet "refs/heads/${ISSUE_BRANCH}" >/dev/null 2>&1; then
+              git checkout "${ISSUE_BRANCH}"
+            else
+              git checkout -b "${ISSUE_BRANCH}" --track "origin/${ISSUE_BRANCH}"
+            fi
+          fi
           git add .
           if ! git diff --cached --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
             git commit -m "Commit changes made by pi"
           fi
-          git push
+          # A plain push can be rejected as non-fast-forward when the remote
+          # branch has moved since we last fetched it (e.g. a previous run
+          # pushed to it, or the agent rebased the branch onto a newer base).
+          # The branch is only ever used by this issue, so force push it.
+          # Fetch first so --force-with-lease allows overwriting the remote
+          # state we know about, while still guarding against a change that
+          # appears between the fetch and the push.
+          git fetch origin "${ISSUE_BRANCH}" 2>/dev/null || true
+          git push --force-with-lease origin "HEAD:${ISSUE_BRANCH}"
       - name: Reply if no code changes made
         if: (steps.save-response-type.outputs.response-type == 'CAN_ADDRESS_FULLY') && (steps.check-for-code-changes.outputs.has-changes == 'false')
         env:

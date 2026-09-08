@@ -7,6 +7,14 @@ inputs:
   prompt-base64:
     description: "Prompt to send to pi in base64"
     required: true
+  provider:
+    description: "Provider to use for pi"
+    required: false
+    default: deepseek
+  model:
+    description: "Model to use for pi"
+    required: false
+    default: deepseek-v4-flash
 outputs:
   response-base64:
     description: "Response json formatted in schema in base64"
@@ -16,17 +24,29 @@ runs:
   steps:
     - shell: bash
       id: pi-response
+      env:
+        PROVIDER: ${{ inputs.provider }}
+        MODEL: ${{ inputs.model }}
       run: |
         CONTEXT=$(echo "${{ inputs.context-base64 }}" | base64 -d)
         PROMPT=$(echo "${{ inputs.prompt-base64 }}" | base64 -d)
         echo "${PROMPT}"
+        echo "provider: ${PROVIDER}"
+        echo "model: ${MODEL}"
         MESSAGE=$(printf '%s\n\n%s\n%s\n%s' "${PROMPT}" "<Start of context>" "${CONTEXT}" "<End of context>")
+        set +e
         PI_RESPONSE=$(pi \
-          --provider deepseek \
-          --model deepseek-v4-flash \
+          --provider "${PROVIDER}" \
+          --model "${MODEL}" \
           --tools read,write,edit,bash,grep,find,ls \
           --print "${MESSAGE}" \
-          )
+        )
+        PI_EXIT=$?
+        set -e
         echo "${PI_RESPONSE}"
+        if [ ${PI_EXIT} -ne 0 ]; then
+          echo "Error: pi exited with code ${PI_EXIT}" >&2
+          exit 1
+        fi
         PI_RESPONSE_BASE64=$(echo "${PI_RESPONSE}" | base64 -w 0)
         echo "pi-response-base64=${PI_RESPONSE_BASE64}" >> "$GITHUB_OUTPUT"

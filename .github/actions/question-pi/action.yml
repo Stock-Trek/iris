@@ -10,6 +10,14 @@ inputs:
   schema-base64:
     description: "Json schema to validate the response with in base64"
     required: true
+  provider:
+    description: "Provider to use for pi"
+    required: false
+    default: deepseek
+  model:
+    description: "Model to use for pi"
+    required: false
+    default: deepseek-v4-flash
 outputs:
   response-base64:
     description: "Response json formatted in schema in base64"
@@ -19,26 +27,34 @@ runs:
   steps:
     - shell: bash
       id: pi-response
+      env:
+        PROVIDER: ${{ inputs.provider }}
+        MODEL: ${{ inputs.model }}
       run: |
         CONTEXT=$(echo "${{ inputs.context-base64 }}" | base64 -d)
         PROMPT=$(echo "${{ inputs.prompt-base64 }}" | base64 -d)
         SCHEMA=$(echo "${{ inputs.schema-base64 }}" | base64 -d)
         echo "${PROMPT}"
         echo "${SCHEMA}"
-        MESSAGE=$(printf '%s\n\n%s\n%s\n%s' "${PROMPT}" "<Start of context>" "${CONTEXT}" "<End of context>")
+        echo "provider: ${PROVIDER}"
+        echo "model: ${MODEL}"
+        MESSAGE=$(printf '%s\n\n%s\n%s\n%s\n\n%s' "${PROMPT}" "<Start of context>" "${CONTEXT}" "<End of context>" "FINAL INSTRUCTION: You MUST call the json_output tool with the JSON object as the 'data' argument. Do NOT output any other text.")
         JSON_OUTPUT_FILE=$(mktemp)
+        set +e
         PI_RESPONSE=$(pi \
-          --provider deepseek \
-          --model deepseek-v4-flash \
+          --provider "${PROVIDER}" \
+          --model "${MODEL}" \
           --tools read,bash,grep,find,ls,json_output \
           --json-schema "${SCHEMA}" \
           --json-fallback force \
           --json-output "${JSON_OUTPUT_FILE}" \
           --print "${MESSAGE}" \
           )
+        PI_EXIT=$?
+        set -e
         echo "${PI_RESPONSE}"
-        if [ ! -s "${JSON_OUTPUT_FILE}" ]; then
-          echo "Error: pi did not write a schema-validated JSON output to ${JSON_OUTPUT_FILE}" >&2
+        if [ ${PI_EXIT} -ne 0 ] || [ ! -s "${JSON_OUTPUT_FILE}" ]; then
+          echo "Error: pi exited with code ${PI_EXIT} without writing a schema-validated JSON output to ${JSON_OUTPUT_FILE}" >&2
           exit 1
         fi
         PI_RESPONSE_BASE64=$(base64 -w 0 < "${JSON_OUTPUT_FILE}")
