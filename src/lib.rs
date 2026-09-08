@@ -4,6 +4,7 @@ mod config;
 mod error;
 mod handler;
 mod listener;
+mod outbound_message;
 #[cfg(test)]
 mod tests;
 mod tls;
