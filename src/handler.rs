@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, ServerCloseBehavior},
+    config::{Config, DisconnectQueueBehavior, ServerCloseBehavior},
     error::ConnectionError,
     listener::SharedListener,
     outbound_message::OutboundMessage,
@@ -109,6 +109,7 @@ where
                     self.reconnect_delay = self.config.circuit_breaker().initial_backoff();
                     self.consecutive_failures = 0;
                     self.circuit_open_until = None;
+                    self.drop_queued_outbound_messages_if_configured();
                     self.connected.store(true, Ordering::Relaxed);
                     self.listener.on_connected().await;
                     let conn_result = self.handle_connection().await;
@@ -131,6 +132,7 @@ where
                                         tracing::info!(
                                             "server closed the connection, will reconnect"
                                         );
+                                        self.drop_queued_outbound_messages_if_configured();
                                         self.consecutive_failures += 1;
                                         self.handle_backoff_with_circuit_breaker().await;
                                         continue;
@@ -143,6 +145,7 @@ where
                                 break;
                             }
                             self.consecutive_failures += 1;
+                            self.drop_queued_outbound_messages_if_configured();
                             self.handle_backoff_with_circuit_breaker().await;
                         }
                     }
@@ -243,6 +246,27 @@ where
             self.reconnect_delay * 2,
             self.config.circuit_breaker().max_backoff(),
         );
+    }
+
+    fn drop_queued_outbound_messages_if_configured(&mut self) {
+        if !matches!(
+            self.config.disconnect_queue_behavior(),
+            DisconnectQueueBehavior::DropQueuedOutboundMessages
+        ) {
+            return;
+        }
+        let mut dropped_count = 0usize;
+        while let Ok(outgoing) = self.message_receiver.try_recv() {
+            let OutboundMessage { message: _, ack } = outgoing;
+            let _ = ack.send(Err(ConnectionError::ConnectionClosed));
+            dropped_count += 1;
+        }
+        if dropped_count > 0 {
+            tracing::warn!(
+                dropped_count = dropped_count,
+                "connection lost, dropped queued outbound messages"
+            );
+        }
     }
 
     async fn connect(&mut self) -> Result<(), ConnectionError> {
