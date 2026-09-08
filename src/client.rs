@@ -1,6 +1,6 @@
 use crate::{
-    config::Config, error::ConnectionError, handler::ConnectionHandler, handler::OutboundMessage,
-    listener::SharedListener,
+    config::Config, error::ConnectionError, handler::ConnectionHandler, listener::SharedListener,
+    outbound_message::OutboundMessage,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::{
@@ -84,10 +84,6 @@ where
 
     /// Sends a message to the server.
     ///
-    /// The message is handed to the background connection task, which
-    /// serialises it and writes it to the socket. This method does **not**
-    /// return until the outcome of that write is known:
-    ///
     /// * `Ok(())` is returned only once the message has actually been written
     ///   to the socket by the connection task.
     /// * An error is returned whenever the message was not written, including
@@ -95,18 +91,7 @@ where
     ///   the message was still queued or being written.
     ///
     /// Note that a successful socket write means the bytes were handed to the
-    /// transport, not that the server has received or processed the message:
-    /// guaranteeing delivery end-to-end would require an application-level
-    /// acknowledgement from the server.
-    ///
-    /// While the connection is down - including during reconnect back-off -
-    /// this method fails fast with [`ConnectionError::ConnectionClosed`] and
-    /// does not buffer the message. A message that was already queued when the
-    /// connection dropped is held and written once the connection is restored
-    /// (unless the connection task ends first, see below), so this method may
-    /// block for the duration of the outage; calling [`Client::disconnect`] or
-    /// [`Client::force_disconnect`] ends the connection task and resolves any
-    /// still-pending sends with [`ConnectionError::ConnectionClosed`].
+    /// transport, not that the server has received or processed the message.
     pub async fn send(&self, message: Request) -> Result<(), ConnectionError> {
         let (sender, connected) = {
             let guard = self
@@ -247,9 +232,7 @@ where
 mod tests {
     use crate::*;
     use futures::SinkExt;
-    use std::sync::Arc;
-    use std::sync::atomic::Ordering;
-    use std::time::Duration;
+    use std::{sync::Arc, sync::atomic::Ordering, time::Duration};
     use tokio_stream::StreamExt;
     use tokio_websockets::{Message, ServerBuilder};
 

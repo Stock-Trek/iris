@@ -2,6 +2,7 @@ use crate::{
     config::{Config, ServerCloseBehavior},
     error::ConnectionError,
     listener::SharedListener,
+    outbound_message::OutboundMessage,
 };
 use futures::SinkExt;
 use rand::Rng;
@@ -21,29 +22,6 @@ use tokio_websockets::{
     WebSocketStream,
 };
 use tracing::{Span, info_span};
-
-/// A message queued by [`crate::Client::send`] together with the channel used
-/// to report the outcome of actually writing it to the socket back to the
-/// waiting `send` caller.
-///
-/// The ack sender is used at most once:
-/// * `Ok(())` is sent once the message has been written to the socket,
-/// * `Err(error)` is sent when the message could not be written (serialization
-///   error, socket write error, write timeout).
-///
-/// If the connection task ends before the message could be written (e.g. the
-/// client was disconnected, the server closed the connection cleanly with
-/// [`crate::config::ServerCloseBehavior::Disconnect`], or a permanent error
-/// gave up reconnecting), the queued message is dropped together with the ack
-/// sender; the waiting `send` caller observes the cancelled oneshot and
-/// returns [`ConnectionError::ConnectionClosed`].
-pub(crate) struct OutboundMessage<Request>
-where
-    Request: Serialize + Send + 'static,
-{
-    pub(crate) message: Request,
-    pub(crate) ack: tokio::sync::oneshot::Sender<Result<(), ConnectionError>>,
-}
 
 #[derive(Debug)]
 pub(crate) struct ConnectionHandler<Request, Response>
@@ -480,14 +458,9 @@ where
     /// to the waiting [`crate::Client::send`] caller through the message's ack
     /// channel.
     ///
-    /// The ack is resolved before this method returns, on every path:
+    /// The ack is resolved before this method returns.
     /// * `Ok(())` is sent once the message has been written to the socket;
     /// * `Err(error)` is sent when the message could not be written.
-    ///
-    /// The returned `Result` is only a signal for the connection loop: `Err`
-    /// means the socket is no longer usable and the connection must be torn
-    /// down so the reconnect machinery takes over (the detailed error has
-    /// already been sent to the caller).
     async fn send_message(
         &mut self,
         outgoing: OutboundMessage<Request>,
@@ -499,9 +472,6 @@ where
                 let err = ConnectionError::Serialization(serialization_error);
                 tracing::error!(error = %err, "message serialization failed");
                 self.listener.on_error(&err).await;
-                // A serialization failure is specific to this message; the
-                // connection itself is unaffected, so report the failure to
-                // the caller and keep the connection open.
                 let _ = ack.send(Err(err));
                 return Ok(());
             }
@@ -525,8 +495,6 @@ where
                     tracing::error!(error = %err, "send failed");
                     self.listener.on_error(&err).await;
                     let _ = ack.send(Err(err));
-                    // The write failed, so the socket cannot be used any more;
-                    // the detailed error was reported to the caller above.
                     Err(ConnectionError::ConnectionClosed)
                 }
             },
