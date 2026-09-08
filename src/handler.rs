@@ -22,6 +22,29 @@ use tokio_websockets::{
 };
 use tracing::{Span, info_span};
 
+/// A message queued by [`crate::Client::send`] together with the channel used
+/// to report the outcome of actually writing it to the socket back to the
+/// waiting `send` caller.
+///
+/// The ack sender is used at most once:
+/// * `Ok(())` is sent once the message has been written to the socket,
+/// * `Err(error)` is sent when the message could not be written (serialization
+///   error, socket write error, write timeout).
+///
+/// If the connection task ends before the message could be written (e.g. the
+/// client was disconnected, the server closed the connection cleanly with
+/// [`crate::config::ServerCloseBehavior::Disconnect`], or a permanent error
+/// gave up reconnecting), the queued message is dropped together with the ack
+/// sender; the waiting `send` caller observes the cancelled oneshot and
+/// returns [`ConnectionError::ConnectionClosed`].
+pub(crate) struct OutboundMessage<Request>
+where
+    Request: Serialize + Send + 'static,
+{
+    pub(crate) message: Request,
+    pub(crate) ack: tokio::sync::oneshot::Sender<Result<(), ConnectionError>>,
+}
+
 #[derive(Debug)]
 pub(crate) struct ConnectionHandler<Request, Response>
 where
@@ -31,7 +54,7 @@ where
     url: String,
     config: Config,
     listener: SharedListener<Response>,
-    message_receiver: Receiver<Request>,
+    message_receiver: Receiver<OutboundMessage<Request>>,
     disconnect_receiver: Receiver<()>,
     connected: Arc<AtomicBool>,
     pong_deadline: Option<tokio::time::Instant>,
@@ -52,7 +75,7 @@ where
         url: &str,
         config: Config,
         listener: SharedListener<Response>,
-        message_receiver: Receiver<Request>,
+        message_receiver: Receiver<OutboundMessage<Request>>,
         disconnect_receiver: Receiver<()>,
         connected: Arc<AtomicBool>,
     ) -> Self {
@@ -312,9 +335,9 @@ where
                     let next_message_result_option = next_message_result_option?;
                     self.handle_message(next_message_result_option).await?
                 }
-                Some(message) = self.message_receiver.recv() => {
+                Some(outgoing) = self.message_receiver.recv() => {
                     tracing::trace!("outgoing message");
-                    self.send_message(message).await?
+                    self.send_message(outgoing).await?
                 }
                 Some(_) = self.disconnect_receiver.recv() => {
                     tracing::info!("user requested disconnect");
@@ -453,14 +476,34 @@ where
         Err(ConnectionError::BadMessagePayload)
     }
 
-    async fn send_message(&mut self, message: Request) -> Result<(), ConnectionError> {
+    /// Writes a queued outbound message to the socket and reports the outcome
+    /// to the waiting [`crate::Client::send`] caller through the message's ack
+    /// channel.
+    ///
+    /// The ack is resolved before this method returns, on every path:
+    /// * `Ok(())` is sent once the message has been written to the socket;
+    /// * `Err(error)` is sent when the message could not be written.
+    ///
+    /// The returned `Result` is only a signal for the connection loop: `Err`
+    /// means the socket is no longer usable and the connection must be torn
+    /// down so the reconnect machinery takes over (the detailed error has
+    /// already been sent to the caller).
+    async fn send_message(
+        &mut self,
+        outgoing: OutboundMessage<Request>,
+    ) -> Result<(), ConnectionError> {
+        let OutboundMessage { message, ack } = outgoing;
         let payload = match serde_json::to_vec(&message) {
-            Ok(p) => p,
-            Err(e) => {
-                let err = ConnectionError::Serialization(e);
+            Ok(payload) => payload,
+            Err(serialization_error) => {
+                let err = ConnectionError::Serialization(serialization_error);
                 tracing::error!(error = %err, "message serialization failed");
                 self.listener.on_error(&err).await;
-                return Err(err);
+                // A serialization failure is specific to this message; the
+                // connection itself is unaffected, so report the failure to
+                // the caller and keep the connection open.
+                let _ = ack.send(Err(err));
+                return Ok(());
             }
         };
         let size_bytes = payload.len();
@@ -474,20 +517,25 @@ where
             Ok(result) => match result {
                 Ok(()) => {
                     self.listener.on_message_size_sent(size_bytes).await;
+                    let _ = ack.send(Ok(()));
                     Ok(())
                 }
-                Err(e) => {
-                    let err = ConnectionError::Websocket(e);
+                Err(websocket_error) => {
+                    let err = ConnectionError::Websocket(websocket_error);
                     tracing::error!(error = %err, "send failed");
                     self.listener.on_error(&err).await;
-                    Err(err)
+                    let _ = ack.send(Err(err));
+                    // The write failed, so the socket cannot be used any more;
+                    // the detailed error was reported to the caller above.
+                    Err(ConnectionError::ConnectionClosed)
                 }
             },
             Err(elapsed) => {
                 let err = ConnectionError::Timeout(elapsed);
                 tracing::error!(error = %err, "message send timed out");
                 self.listener.on_error(&err).await;
-                Err(err)
+                let _ = ack.send(Err(err));
+                Err(ConnectionError::ConnectionClosed)
             }
         }
     }
@@ -565,7 +613,8 @@ mod tests {
         let config = config.with_circuit_breaker_config(
             CircuitBreakerConfig::new().with_max_reconnect_attempts(5),
         );
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestRequest>(10);
+        let (_msg_rx, _msg_rx_recv) =
+            tokio::sync::mpsc::channel::<OutboundMessage<TestRequest>>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let mut handler = ConnectionHandler::new(
@@ -590,7 +639,8 @@ mod tests {
         let (config, listener) = make_config();
         let config = config
             .with_circuit_breaker_config(CircuitBreakerConfig::new().with_no_reconnect_limit());
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestRequest>(10);
+        let (_msg_rx, _msg_rx_recv) =
+            tokio::sync::mpsc::channel::<OutboundMessage<TestRequest>>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let mut handler = ConnectionHandler::new(
@@ -608,7 +658,8 @@ mod tests {
     #[test]
     fn parse_valid_text_message() {
         let (config, listener) = make_config();
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestRequest>(10);
+        let (_msg_rx, _msg_rx_recv) =
+            tokio::sync::mpsc::channel::<OutboundMessage<TestRequest>>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let handler = ConnectionHandler::new(
@@ -636,7 +687,8 @@ mod tests {
     #[test]
     fn parse_valid_binary_message() {
         let (config, listener) = make_config();
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestRequest>(10);
+        let (_msg_rx, _msg_rx_recv) =
+            tokio::sync::mpsc::channel::<OutboundMessage<TestRequest>>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let handler = ConnectionHandler::new(
@@ -664,7 +716,8 @@ mod tests {
     #[test]
     fn parse_invalid_json_text_returns_error() {
         let (config, listener) = make_config();
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestRequest>(10);
+        let (_msg_rx, _msg_rx_recv) =
+            tokio::sync::mpsc::channel::<OutboundMessage<TestRequest>>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let handler = ConnectionHandler::new(
@@ -687,7 +740,8 @@ mod tests {
     #[test]
     fn parse_invalid_json_binary_returns_error() {
         let (config, listener) = make_config();
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestRequest>(10);
+        let (_msg_rx, _msg_rx_recv) =
+            tokio::sync::mpsc::channel::<OutboundMessage<TestRequest>>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let handler = ConnectionHandler::new(
@@ -710,7 +764,8 @@ mod tests {
     #[test]
     fn parse_unsupported_message_type_returns_bad_message_payload() {
         let (config, listener) = make_config();
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestRequest>(10);
+        let (_msg_rx, _msg_rx_recv) =
+            tokio::sync::mpsc::channel::<OutboundMessage<TestRequest>>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let handler = ConnectionHandler::new(
@@ -733,7 +788,8 @@ mod tests {
     #[test]
     fn parse_message_size_matches_payload() {
         let (config, listener) = make_config();
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestRequest>(10);
+        let (_msg_rx, _msg_rx_recv) =
+            tokio::sync::mpsc::channel::<OutboundMessage<TestRequest>>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let handler = ConnectionHandler::new(
@@ -758,7 +814,8 @@ mod tests {
                 .with_initial_backoff(Duration::from_secs(1))
                 .with_max_backoff(Duration::from_secs(10)),
         );
-        let (_msg_rx, _msg_rx_recv) = tokio::sync::mpsc::channel::<TestRequest>(10);
+        let (_msg_rx, _msg_rx_recv) =
+            tokio::sync::mpsc::channel::<OutboundMessage<TestRequest>>(10);
         let (_disc_tx, _disc_rx) = tokio::sync::mpsc::channel(10);
         let connected = Arc::new(AtomicBool::new(false));
         let mut handler = ConnectionHandler::new(

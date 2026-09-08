@@ -1,5 +1,6 @@
 use crate::{
-    config::Config, error::ConnectionError, handler::ConnectionHandler, listener::SharedListener,
+    config::Config, error::ConnectionError, handler::ConnectionHandler, handler::OutboundMessage,
+    listener::SharedListener,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::{
@@ -28,7 +29,7 @@ struct ClientState<Request>
 where
     Request: Serialize + Send + 'static,
 {
-    message_sender: Sender<Request>,
+    message_sender: Sender<OutboundMessage<Request>>,
     disconnect_sender: Sender<()>,
     connection_task: JoinHandle<()>,
     connected: Arc<AtomicBool>,
@@ -57,7 +58,7 @@ where
             return Ok(());
         }
         let (message_sender, message_receiver) =
-            channel::<Request>(self.config.channel_buffer_size);
+            channel::<OutboundMessage<Request>>(self.config.channel_buffer_size);
         let (disconnect_sender, disconnect_receiver) =
             channel::<()>(self.config.channel_buffer_size);
         let connected = Arc::new(AtomicBool::new(true));
@@ -83,11 +84,29 @@ where
 
     /// Sends a message to the server.
     ///
-    /// Fails fast with [`ConnectionError::ConnectionClosed`] whenever
-    /// [`Client::is_connected`] is `false` (i.e. the client has never been
-    /// connected, has been disconnected, or the connection is currently down
-    /// while reconnecting), so messages are never buffered while the outbound
-    /// channel is not actively connected.
+    /// The message is handed to the background connection task, which
+    /// serialises it and writes it to the socket. This method does **not**
+    /// return until the outcome of that write is known:
+    ///
+    /// * `Ok(())` is returned only once the message has actually been written
+    ///   to the socket by the connection task.
+    /// * An error is returned whenever the message was not written, including
+    ///   when the connection dropped (or the client was disconnected) while
+    ///   the message was still queued or being written.
+    ///
+    /// Note that a successful socket write means the bytes were handed to the
+    /// transport, not that the server has received or processed the message:
+    /// guaranteeing delivery end-to-end would require an application-level
+    /// acknowledgement from the server.
+    ///
+    /// While the connection is down - including during reconnect back-off -
+    /// this method fails fast with [`ConnectionError::ConnectionClosed`] and
+    /// does not buffer the message. A message that was already queued when the
+    /// connection dropped is held and written once the connection is restored
+    /// (unless the connection task ends first, see below), so this method may
+    /// block for the duration of the outage; calling [`Client::disconnect`] or
+    /// [`Client::force_disconnect`] ends the connection task and resolves any
+    /// still-pending sends with [`ConnectionError::ConnectionClosed`].
     pub async fn send(&self, message: Request) -> Result<(), ConnectionError> {
         let (sender, connected) = {
             let guard = self
@@ -102,10 +121,24 @@ where
         if !connected.load(Ordering::Relaxed) {
             return Err(ConnectionError::ConnectionClosed);
         }
+        let (ack_sender, ack_receiver) = tokio::sync::oneshot::channel();
+        let outgoing = OutboundMessage {
+            message,
+            ack: ack_sender,
+        };
         sender
-            .send(message)
+            .send(outgoing)
             .await
-            .map_err(|e| ConnectionError::SendMessage(format!("{:?}", e)))
+            .map_err(|e| ConnectionError::SendMessage(format!("{:?}", e)))?;
+        match ack_receiver.await {
+            Ok(result) => result,
+            // The connection task ended (e.g. `disconnect`/`force_disconnect`,
+            // a clean server close with
+            // [`crate::config::ServerCloseBehavior::Disconnect`], or a
+            // permanent error) before the message could be written to the
+            // socket. The message was dropped without ever being sent.
+            Err(_) => Err(ConnectionError::ConnectionClosed),
+        }
     }
 
     pub fn is_connected(&self) -> bool {
@@ -213,8 +246,12 @@ where
 #[cfg(test)]
 mod tests {
     use crate::*;
+    use futures::SinkExt;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    use tokio_stream::StreamExt;
+    use tokio_websockets::{Message, ServerBuilder};
 
     #[derive(serde::Serialize, Debug, Clone, PartialEq)]
     struct TestRequest {
@@ -245,7 +282,10 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_when_connected_is_ok() {
-        let mut client = client();
+        // `send` now only returns Ok once the message has actually been
+        // written to the socket, so a live echo server is required.
+        let (port, _shutdown) = run_echo_server().await;
+        let mut client = client_to(&format!("ws://127.0.0.1:{}/ws", port));
         connect(&mut client).await;
         let result = client
             .send(TestRequest {
@@ -254,6 +294,49 @@ mod tests {
             .await;
         assert!(result.is_ok());
         disconnect(&mut client).await;
+    }
+
+    #[tokio::test]
+    async fn send_returns_error_when_message_is_never_written() {
+        // A TCP listener that accepts the connection but never completes the
+        // WebSocket handshake: the handler can never write a queued message,
+        // so `send` must not report Ok. Once the connection task is torn down
+        // via `disconnect`, the still-queued message is dropped and the
+        // pending `send` must resolve with an error rather than a false Ok.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind");
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((_stream, _addr)) = listener.accept().await {
+                // Hold the connection open without completing the handshake.
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
+
+        let client = Arc::new(client_to(&format!("ws://127.0.0.1:{}/ws", port)));
+        client.connect().await.unwrap();
+        // Let the handler reach the (hanging) connect phase.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let sender = client.clone();
+        let send_task = tokio::spawn(async move {
+            sender
+                .send(TestRequest {
+                    value: "never sent".to_string(),
+                })
+                .await
+        });
+        // Give `send` enough time to queue the message and start waiting for
+        // the write that will never happen.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        client.disconnect().await.unwrap();
+
+        match send_task.await.unwrap() {
+            Err(ConnectionError::ConnectionClosed) => {}
+            other => panic!("expected ConnectionClosed, got: {:?}", other.map(|_| ())),
+        }
     }
 
     #[tokio::test]
@@ -336,9 +419,12 @@ mod tests {
     }
 
     fn client() -> Client<TestRequest, TestResponse> {
+        client_to("ws://localhost:0")
+    }
+    fn client_to(url: &str) -> Client<TestRequest, TestResponse> {
         let config = Config::new();
         let listener: SharedListener<TestResponse> = Arc::new(TestListener);
-        Client::new(config, listener, "ws://localhost:0")
+        Client::new(config, listener, url)
     }
     async fn connect(client: &mut Client<TestRequest, TestResponse>) {
         match client.connect().await {
@@ -351,5 +437,50 @@ mod tests {
             Ok(_) => {}
             _ => panic!("Client did not disconnect"),
         }
+    }
+
+    /// Starts a minimal echo server and returns its port plus a shutdown
+    /// signal.
+    async fn run_echo_server() -> (u16, tokio::sync::oneshot::Sender<()>) {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind");
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let mut shutdown_rx = Some(shutdown_rx);
+            loop {
+                tokio::select! {
+                    _ = async {
+                        if let Some(rx) = &mut shutdown_rx {
+                            rx.await.ok();
+                        }
+                    } => {
+                        break;
+                    }
+                    accept_result = listener.accept() => {
+                        let (stream, _) = accept_result.unwrap();
+                        tokio::spawn(async move {
+                            let builder = ServerBuilder::new();
+                            if let Ok((_request, mut ws_stream)) = builder.accept(stream).await {
+                                while let Some(Ok(msg)) = ws_stream.next().await {
+                                    if msg.is_ping() {
+                                        let payload = msg.into_payload();
+                                        let _ = ws_stream.send(Message::pong(payload)).await;
+                                    } else if msg.is_text() || msg.is_binary() {
+                                        let _ = ws_stream.send(msg).await;
+                                    } else if msg.is_close() {
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        });
+
+        (port, shutdown_tx)
     }
 }
