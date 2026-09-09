@@ -64,7 +64,7 @@ impl Config {
         self.disconnect_timeout = disconnect_timeout;
         self
     }
-    pub fn with_disconnect_queue_behavior(mut self, behavior: DisconnectedBehavior) -> Self {
+    pub fn with_disconnected_behavior(mut self, behavior: DisconnectedBehavior) -> Self {
         self.disconnected_behavior = behavior;
         self
     }
