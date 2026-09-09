@@ -20,7 +20,7 @@ pub struct Config {
     pub(crate) channel_buffer_size: usize,
     pub(crate) circuit_breaker: CircuitBreakerConfig,
     pub(crate) disconnect_timeout: Duration,
-    pub(crate) disconnect_queue_behavior: DisconnectedBehavior,
+    pub(crate) disconnected_behavior: DisconnectedBehavior,
     pub(crate) message_timeout: Duration,
     pub(crate) ping_interval: Duration,
     pub(crate) pong_timeout: Duration,
@@ -34,7 +34,7 @@ impl Default for Config {
             channel_buffer_size: 256,
             circuit_breaker: CircuitBreakerConfig::default(),
             disconnect_timeout: Duration::from_secs(10),
-            disconnect_queue_behavior: DisconnectedBehavior::default(),
+            disconnected_behavior: DisconnectedBehavior::default(),
             message_timeout: Duration::from_secs(10),
             ping_interval: Duration::from_secs(30),
             pong_timeout: Duration::from_secs(30),
@@ -65,7 +65,7 @@ impl Config {
         self
     }
     pub fn with_disconnect_queue_behavior(mut self, behavior: DisconnectedBehavior) -> Self {
-        self.disconnect_queue_behavior = behavior;
+        self.disconnected_behavior = behavior;
         self
     }
     pub fn with_message_timeout(mut self, message_timeout: Duration) -> Self {
@@ -96,7 +96,7 @@ impl Config {
         self.disconnect_timeout
     }
     pub(crate) fn disconnect_queue_behavior(&self) -> &DisconnectedBehavior {
-        &self.disconnect_queue_behavior
+        &self.disconnected_behavior
     }
     pub(crate) fn message_timeout(&self) -> Duration {
         self.message_timeout
