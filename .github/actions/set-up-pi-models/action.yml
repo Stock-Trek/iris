@@ -3,56 +3,60 @@ description: "Configure pi to connect to the DeepSeek and Eden AI providers"
 runs:
   using: "composite"
   steps:
+    - name: Remove credentials before installing third-party packages
+      shell: bash
+      run: |
+        # The checkout still has the GitHub token persisted, and earlier steps
+        # may have left other credentials on disk. Remove them before running
+        # any dependency installation code (install scripts run with the same
+        # access as the job). The push step restores the token later.
+        bash .github/scripts/remove-credentials.sh
+
     - name: Setup Bun
-      uses: oven-sh/setup-bun@v2
+      uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
     - name: Install pi-coding-agent and json-schema extension
       shell: bash
       run: |
-        bun install -g @earendil-works/pi-coding-agent
-        pi install npm:@nqbao/pi-json-schema
+        # Pin exact versions: a compromised or unexpected new release would
+        # otherwise run with the job's credentials during installation.
+        bun install -g @earendil-works/pi-coding-agent@1.3.0
+        pi install npm:@nqbao/pi-json-schema@0.1.1
 
     - name: Configure custom providers and models
       shell: bash
-      env:
-        DEEPSEEK_API_KEY: ${{ env.DEEPSEEK_API_KEY }}
-        EDENAI_API_KEY: ${{ env.EDENAI_API_KEY }}
       run: |
-        if [ -z "${DEEPSEEK_API_KEY}" ]; then
-          echo "Error: DeepSeek API key is not set. Check the Infisical project configuration." >&2
-          exit 1
-        fi
-        if [ -z "${EDENAI_API_KEY}" ]; then
-          echo "Error: Eden AI API key is not set. Check the Infisical project configuration." >&2
-          exit 1
-        fi
         mkdir -p ~/.pi/agent
+        chmod 700 ~/.pi/agent
         # Each model declares the full "id" pi needs to make API calls plus a
         # short "key" that users can type after "@model = ..." in place of the
         # (sometimes very long) id, e.g. "@model = \"glm\"" instead of the full
         # fireworks path below. Keys must be unique across all providers.
+        #
+        # models.json deliberately contains no secrets. The API keys are read at
+        # request time from short-lived files created by invoke-pi/question-pi,
+        # and the credential commands written to auth.json below delete each
+        # file as soon as pi has read it. The resolved value is cached for the
+        # lifetime of the pi process, so pi's tools (which run in the same
+        # process and can read files and run bash) never see a usable copy.
         jq -n \
           --arg deepseekBaseUrl "https://api.deepseek.com/v1" \
           --arg deepseekApi "openai-completions" \
-          --arg deepseekApiKey "${DEEPSEEK_API_KEY}" \
           --arg edenBaseUrl "https://api.edenai.run/v3" \
           --arg edenApi "openai-completions" \
-          --arg edenApiKey "${EDENAI_API_KEY}" \
           '{
             "providers": {
               "deepseek": {
                 "baseUrl": $deepseekBaseUrl,
                 "api": $deepseekApi,
-                "apiKey": $deepseekApiKey,
                 "models": [
-                  { "id": "deepseek-v4-flash", "key": "flash" },
+                  { "id": "deepseek-flash", "key": "flash" },
                   { "id": "deepseek-v4-pro", "key": "pro" }
                 ]
               },
               "eden": {
                 "baseUrl": $edenBaseUrl,
                 "api": $edenApi,
-                "apiKey": $edenApiKey,
                 "models": [
                   { "id": "fireworks_ai/accounts/fireworks/models/glm-5p3-flash", "key": "glm" },
                   { "id": "deepinfra/tencent/Hy3", "key": "hy3" }
@@ -60,3 +64,23 @@ runs:
               }
             }
           }' > ~/.pi/agent/models.json
+        chmod 600 ~/.pi/agent/models.json
+
+        # Read the per-run key file and remove it in the same command. Pi caches
+        # the result for the rest of the process, so it is still available for
+        # later requests but no longer exists on disk.
+        DEEPSEEK_KEY_COMMAND='!cat "$HOME/.pi/agent/.deepseek-key" 2>/dev/null; rm -f "$HOME/.pi/agent/.deepseek-key"'
+        EDEN_KEY_COMMAND='!cat "$HOME/.pi/agent/.eden-key" 2>/dev/null; rm -f "$HOME/.pi/agent/.eden-key"'
+        if [ ! -s ~/.pi/agent/auth.json ]; then
+          echo '{}' > ~/.pi/agent/auth.json
+        fi
+        AUTH=$(jq -n \
+          --arg deepseekKeyCommand "${DEEPSEEK_KEY_COMMAND}" \
+          --arg edenKeyCommand "${EDEN_KEY_COMMAND}" \
+          '{
+            "deepseek": { "type": "api_key", "key": $deepseekKeyCommand },
+            "eden": { "type": "api_key", "key": $edenKeyCommand }
+          }')
+        jq --argjson auth "${AUTH}" '. * $auth' ~/.pi/agent/auth.json > ~/.pi/agent/auth.json.tmp
+        mv ~/.pi/agent/auth.json.tmp ~/.pi/agent/auth.json
+        chmod 600 ~/.pi/agent/auth.json

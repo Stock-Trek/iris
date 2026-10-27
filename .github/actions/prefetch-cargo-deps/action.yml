@@ -1,0 +1,93 @@
+name: "Prefetch cargo dependencies"
+description: "Fetch Cargo dependencies in a trusted step so the agent can run offline"
+inputs:
+  shipyard-cargo-token:
+    description: "Optional read-only Shipyard registry token, used only for this fetch"
+    required: false
+  shipyard-ssh-private-key:
+    description: "Optional read-only Shipyard deploy key, loaded into a short-lived ssh-agent"
+    required: false
+  shipyard-known-host:
+    description: "Known_hosts entry for ssh.shipyard.rs, required with shipyard-ssh-private-key"
+    required: false
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      env:
+        CARGO_REGISTRIES_SHIPYARD_TOKEN: ${{ inputs.shipyard-cargo-token }}
+        SHIPYARD_SSH_PRIVATE_KEY: ${{ inputs.shipyard-ssh-private-key }}
+        SHIPYARD_KNOWN_HOST: ${{ inputs.shipyard-known-host }}
+      run: |
+        set -u
+
+        if [ ! -f Cargo.lock ]; then
+          echo "Error: Cargo.lock is required to prefetch dependencies" >&2
+          exit 1
+        fi
+
+        # Keep every temporary file (known_hosts, ssh-agent socket) outside the
+        # repository and outside ~/.ssh, and remove it again on exit, so no
+        # credential survives into the agent run.
+        WORK_DIR=$(mktemp -d)
+        chmod 700 "${WORK_DIR}"
+        SSH_AGENT_STARTED=""
+        cleanup() {
+          if [ -n "${SSH_AGENT_STARTED}" ]; then
+            ssh-agent -k > /dev/null 2>&1 || true
+          fi
+          rm -rf "${WORK_DIR}"
+        }
+        trap cleanup EXIT
+
+        if [ -n "${SHIPYARD_SSH_PRIVATE_KEY:-}" ]; then
+          if [ -z "${SHIPYARD_KNOWN_HOST:-}" ]; then
+            echo "Error: shipyard-known-host is required when shipyard-ssh-private-key is set" >&2
+            exit 1
+          fi
+          printf '%s\n' "${SHIPYARD_KNOWN_HOST}" > "${WORK_DIR}/known_hosts"
+          chmod 600 "${WORK_DIR}/known_hosts"
+          # Point git at the throwaway known_hosts file instead of ~/.ssh.
+          export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=${WORK_DIR}/known_hosts -o StrictHostKeyChecking=yes"
+          # Cargo fetches git-based registry indexes with libgit2 by default,
+          # which does not use GIT_SSH_COMMAND or an ssh-agent the way the git
+          # CLI does, so force the CLI for this fetch.
+          export CARGO_NET_GIT_FETCH_WITH_CLI=true
+          # Short-lived agent: it only has to live for this fetch.
+          eval "$(ssh-agent -t 900 -s)" > /dev/null
+          SSH_AGENT_STARTED=1
+          if ! printf '%s\n' "${SHIPYARD_SSH_PRIVATE_KEY}" | ssh-add - > /dev/null 2>&1; then
+            echo "Error: failed to load the Shipyard deploy key into ssh-agent" >&2
+            exit 1
+          fi
+        fi
+
+        # The registry token is passed to Cargo through the environment of this
+        # step only, so it is never written to ~/.cargo/credentials and never
+        # reaches a later step.
+        if [ -n "${CARGO_REGISTRIES_SHIPYARD_TOKEN:-}" ]; then
+          export CARGO_REGISTRIES_SHIPYARD_TOKEN="${CARGO_REGISTRIES_SHIPYARD_TOKEN}"
+        fi
+
+        # --locked refuses to update Cargo.lock, so the cache matches the
+        # committed lockfile instead of resolving new versions.
+        cargo fetch --locked
+
+        # Drop the credentials from the environment the rest of the job
+        # inherits (the Infisical steps export them through GITHUB_ENV). The
+        # crates stay in Cargo's local cache, which is all the agent needs.
+        for name in \
+          CARGO_REGISTRIES_SHIPYARD_TOKEN \
+          SHIPYARD_SSH_PRIVATE_KEY_READONLY \
+          SHIPYARD_KNOWN_HOST; do
+          if [ -n "${!name:-}" ]; then
+            printf '%s=\n' "${name}" >> "$GITHUB_ENV"
+          fi
+        done
+        unset CARGO_REGISTRIES_SHIPYARD_TOKEN CARGO_REGISTRIES_SHIPYARD_TOKEN \
+          SHIPYARD_SSH_PRIVATE_KEY SHIPYARD_KNOWN_HOST
+
+        # The dependencies are now in Cargo's local cache, so tell invoke-pi to
+        # run the agent with CARGO_NET_OFFLINE=true. A new dependency added
+        # during the agent run therefore needs another trusted prefetch.
+        printf 'CARGO_NET_OFFLINE=true\n' >> "$GITHUB_ENV"

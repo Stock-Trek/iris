@@ -14,11 +14,11 @@ inputs:
   model:
     description: "Model to use for pi"
     required: false
-    default: deepseek-v4-flash
+    default: deepseek-flash
 outputs:
   response-base64:
     description: "Response json formatted in schema in base64"
-    value: ${{ steps.pi-response.outputs.pi-response-base64 }}
+    value: ${{ steps.save-response.outputs.pi-response-base64 }}
 runs:
   using: "composite"
   steps:
@@ -34,19 +34,96 @@ runs:
         echo "provider: ${PROVIDER}"
         echo "model: ${MODEL}"
         MESSAGE=$(printf '%s\n\n%s\n%s\n%s' "${PROMPT}" "<Start of context>" "${CONTEXT}" "<End of context>")
-        set +e
-        PI_RESPONSE=$(pi \
-          --provider "${PROVIDER}" \
-          --model "${MODEL}" \
-          --tools read,write,edit,bash,grep,find,ls \
-          --print "${MESSAGE}" \
-        )
-        PI_EXIT=$?
-        set -e
-        echo "${PI_RESPONSE}"
-        if [ ${PI_EXIT} -ne 0 ]; then
-          echo "Error: pi exited with code ${PI_EXIT}" >&2
+        RESPONSE_FILE=$(mktemp)
+        echo "response-file=${RESPONSE_FILE}" >> "$GITHUB_OUTPUT"
+
+        # Stage only the selected provider's key in a short-lived file. Pi reads
+        # it through the credential command configured by set-up-pi-models,
+        # which deletes the file as soon as it has read it. Creating only the
+        # selected provider's file also means the other provider's key never
+        # exists on disk during the agent run.
+        case "${PROVIDER}" in
+          deepseek) PI_KEY="${DEEPSEEK_API_KEY}" ;;
+          eden) PI_KEY="${EDENAI_API_KEY}" ;;
+          *)
+            echo "Error: unknown provider '${PROVIDER}'" >&2
+            exit 1
+            ;;
+        esac
+        if [ -z "${PI_KEY}" ]; then
+          echo "Error: API key for provider '${PROVIDER}' is not set" >&2
           exit 1
         fi
-        PI_RESPONSE_BASE64=$(echo "${PI_RESPONSE}" | base64 -w 0)
+        mkdir -p "${HOME}/.pi/agent"
+        chmod 700 "${HOME}/.pi/agent"
+        umask 077
+        printf '%s' "${PI_KEY}" > "${HOME}/.pi/agent/.${PROVIDER}-key"
+
+        # The job holds Infisical secrets. Remove credentials from disk and
+        # clear the model/registry keys from the environment used by later
+        # steps. This is the last pi invocation, so they are not needed again.
+        bash .github/scripts/remove-credentials.sh
+
+        # Private crate registry access (for example Shipyard) is handled by
+        # the trusted prefetch step before this action: the deploy key and
+        # registry token are used to populate Cargo's local cache and are then
+        # removed. Nothing here needs registry credentials, so none are loaded.
+
+        # Clear model and registry credentials from the environment used by
+        # later steps. This is the last pi invocation, so they are not needed.
+        # The prefetch step clears the registry secrets too; clear them again in
+        # case it did not run.
+        for name in \
+          DEEPSEEK_API_KEY \
+          EDENAI_API_KEY \
+          CARGO_REGISTRIES_SHIPYARD_TOKEN \
+          SHIPYARD_SSH_PRIVATE_KEY_READONLY \
+          SHIPYARD_KNOWN_HOST; do
+          if [ -n "${!name:-}" ]; then
+            printf '%s=\n' "${name}" >> "${GITHUB_ENV}"
+          fi
+        done
+        PI_ENV=(
+          HOME="$HOME"
+          PATH="$PATH"
+          TERM=dumb
+          GIT_TERMINAL_PROMPT=0
+        )
+        # Dependencies were prefetched in a trusted step, so do not let the
+        # agent reach the network for crates: a prompt injection then has no
+        # registry credential to use and Cargo resolves everything from its
+        # local cache. Adding a new dependency during the run needs another
+        # prefetch in a trusted step.
+        if [ "${CARGO_NET_OFFLINE:-false}" = "true" ]; then
+          PI_ENV+=(CARGO_NET_OFFLINE=true)
+        fi
+
+        # Replace this shell so the credentials in its environment cannot be
+        # read back through /proc by the agent while pi runs.
+        set +e
+        exec env -i "${PI_ENV[@]}" \
+          pi \
+          --provider "${PROVIDER}" \
+          --model "${MODEL}" \
+          --no-approve \
+          --tools read,write,edit,bash,grep,find,ls \
+          --print "${MESSAGE}" \
+          > "${RESPONSE_FILE}"
+    - shell: bash
+      id: save-response
+      env:
+        RESPONSE_FILE: ${{ steps.pi-response.outputs.response-file }}
+      run: |
+        if [ ! -s "${RESPONSE_FILE}" ]; then
+          echo "Error: pi did not produce a response" >&2
+          exit 1
+        fi
+        # Remove any staged provider key even if pi exited before its
+        # credential command read it. The key must not survive into later steps.
+        /usr/bin/rm -f "${HOME}/.pi/agent/."*"-key"
+        # Do not echo the model response: it is untrusted text and could
+        # contain secrets the agent encountered, which would then be readable
+        # in the workflow logs.
+        PI_RESPONSE_BASE64=$(/usr/bin/base64 -w 0 < "${RESPONSE_FILE}")
+        rm -f "${RESPONSE_FILE}"
         echo "pi-response-base64=${PI_RESPONSE_BASE64}" >> "$GITHUB_OUTPUT"

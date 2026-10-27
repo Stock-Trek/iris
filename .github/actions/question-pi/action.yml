@@ -17,11 +17,11 @@ inputs:
   model:
     description: "Model to use for pi"
     required: false
-    default: deepseek-v4-flash
+    default: deepseek-flash
 outputs:
   response-base64:
     description: "Response json formatted in schema in base64"
-    value: ${{ steps.pi-response.outputs.pi-response-base64 }}
+    value: ${{ steps.save-response.outputs.pi-response-base64 }}
 runs:
   using: "composite"
   steps:
@@ -40,23 +40,68 @@ runs:
         echo "model: ${MODEL}"
         MESSAGE=$(printf '%s\n\n%s\n%s\n%s\n\n%s' "${PROMPT}" "<Start of context>" "${CONTEXT}" "<End of context>" "FINAL INSTRUCTION: You MUST call the json_output tool with the JSON object as the 'data' argument. Do NOT output any other text.")
         JSON_OUTPUT_FILE=$(mktemp)
+        STDOUT_FILE=$(mktemp)
+        echo "json-output-file=${JSON_OUTPUT_FILE}" >> "$GITHUB_OUTPUT"
+        echo "stdout-file=${STDOUT_FILE}" >> "$GITHUB_OUTPUT"
+
+        # Stage only the selected provider's key in a short-lived file. Pi reads
+        # it through the credential command configured by set-up-pi-models,
+        # which deletes the file as soon as it has read it. Creating only the
+        # selected provider's file also means the other provider's key never
+        # exists on disk during the agent run.
+        case "${PROVIDER}" in
+          deepseek) PI_KEY="${DEEPSEEK_API_KEY}" ;;
+          eden) PI_KEY="${EDENAI_API_KEY}" ;;
+          *)
+            echo "Error: unknown provider '${PROVIDER}'" >&2
+            exit 1
+            ;;
+        esac
+        if [ -z "${PI_KEY}" ]; then
+          echo "Error: API key for provider '${PROVIDER}' is not set" >&2
+          exit 1
+        fi
+        mkdir -p "${HOME}/.pi/agent"
+        chmod 700 "${HOME}/.pi/agent"
+        umask 077
+        printf '%s' "${PI_KEY}" > "${HOME}/.pi/agent/.${PROVIDER}-key"
+
+        # Remove credentials that the agent could otherwise read from disk
+        # (SSH keys, git credential, runner command files, ...). This action
+        # only grants read/grep/find/ls, but those tools can still read files
+        # and /proc.
+        bash .github/scripts/remove-credentials.sh
+
+        # Replace this shell so the credentials in its environment cannot be
+        # read back through /proc by the agent while pi runs.
         set +e
-        PI_RESPONSE=$(pi \
+        exec env -i HOME="$HOME" PATH="$PATH" TERM=dumb \
+          pi \
           --provider "${PROVIDER}" \
           --model "${MODEL}" \
-          --tools read,bash,grep,find,ls,json_output \
+          --no-approve \
+          --tools read,grep,find,ls,json_output \
           --json-schema "${SCHEMA}" \
           --json-fallback force \
           --json-output "${JSON_OUTPUT_FILE}" \
           --print "${MESSAGE}" \
-          )
-        PI_EXIT=$?
-        set -e
-        echo "${PI_RESPONSE}"
-        if [ ${PI_EXIT} -ne 0 ] || [ ! -s "${JSON_OUTPUT_FILE}" ]; then
-          echo "Error: pi exited with code ${PI_EXIT} without writing a schema-validated JSON output to ${JSON_OUTPUT_FILE}" >&2
+          > "${STDOUT_FILE}"
+    - shell: bash
+      id: save-response
+      env:
+        JSON_OUTPUT_FILE: ${{ steps.pi-response.outputs.json-output-file }}
+        STDOUT_FILE: ${{ steps.pi-response.outputs.stdout-file }}
+      run: |
+        if [ ! -s "${JSON_OUTPUT_FILE}" ]; then
+          echo "Error: pi did not write a schema-validated JSON output to ${JSON_OUTPUT_FILE}" >&2
           exit 1
         fi
-        PI_RESPONSE_BASE64=$(base64 -w 0 < "${JSON_OUTPUT_FILE}")
-        rm -f "${JSON_OUTPUT_FILE}"
+        # Remove any staged provider key even if pi exited before its
+        # credential command read it. The key must not survive into later steps.
+        /usr/bin/rm -f "${HOME}/.pi/agent/."*"-key"
+        # Do not echo pi's output: it is untrusted text and could contain
+        # secrets the agent encountered, which would then be readable in the
+        # workflow logs.
+        PI_RESPONSE_BASE64=$(/usr/bin/base64 -w 0 < "${JSON_OUTPUT_FILE}")
+        rm -f "${JSON_OUTPUT_FILE}" "${STDOUT_FILE}"
         echo "pi-response-base64=${PI_RESPONSE_BASE64}" >> "$GITHUB_OUTPUT"
