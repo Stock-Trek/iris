@@ -32,6 +32,7 @@ impl ConnectionError {
                 | Self::BadMessagePayload
                 | Self::MaxReconnectAttempts(_)
                 | Self::TaskPanicked(_)
+                | Self::Websocket(WebsocketError::DisallowedHeader)
         )
     }
 }

@@ -891,3 +891,105 @@ async fn disconnect_during_connect_returns_promptly() {
     );
     assert!(!client.is_connected());
 }
+
+async fn run_capturing_server() -> (u16, mpsc::UnboundedReceiver<(Option<String>, bool)>) {
+    let (capture_tx, capture_rx) = mpsc::unbounded_channel();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind");
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let capture_tx = capture_tx.clone();
+            tokio::spawn(async move {
+                let builder = ServerBuilder::new();
+                if let Ok((request, mut ws_stream)) = builder.accept(stream).await {
+                    let header = request
+                        .headers()
+                        .get("x-test-header")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    while let Some(Ok(msg)) = ws_stream.next().await {
+                        if msg.is_text() || msg.is_binary() {
+                            capture_tx.send((header.clone(), msg.is_text())).ok();
+                            let _ = ws_stream.send(msg).await;
+                        } else if msg.is_close() {
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    (port, capture_rx)
+}
+
+#[tokio::test]
+async fn custom_headers_are_sent_in_handshake() {
+    let (port, mut capture_rx) = run_capturing_server().await;
+    let (_event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (msg_tx, _msg_rx) = mpsc::unbounded_channel();
+    let listener = IntegrationListener {
+        events: _event_tx,
+        received_messages: msg_tx,
+    };
+    let config = stuck_config().with_header("x-test-header", "header-value");
+    let url = format!("ws://127.0.0.1:{}/ws", port);
+    let client: Client<String, String> = Client::new(config, Arc::new(listener), &url);
+    client.connect().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    client.send("hello".to_string()).await.unwrap();
+    let (header, _) = tokio::time::timeout(Duration::from_secs(5), capture_rx.recv())
+        .await
+        .expect("timeout waiting for captured request")
+        .expect("capture channel closed");
+    assert_eq!(header.as_deref(), Some("header-value"));
+    client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn json_message_format_sends_text_frames() {
+    let (port, mut capture_rx) = run_capturing_server().await;
+    let (_event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (msg_tx, _msg_rx) = mpsc::unbounded_channel();
+    let listener = IntegrationListener {
+        events: _event_tx,
+        received_messages: msg_tx,
+    };
+    let config = stuck_config().with_message_format(MessageFormat::Json);
+    let url = format!("ws://127.0.0.1:{}/ws", port);
+    let client: Client<String, String> = Client::new(config, Arc::new(listener), &url);
+    client.connect().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    client.send("hello".to_string()).await.unwrap();
+    let (_, is_text) = tokio::time::timeout(Duration::from_secs(5), capture_rx.recv())
+        .await
+        .expect("timeout waiting for captured request")
+        .expect("capture channel closed");
+    assert!(is_text);
+    client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn binary_message_format_sends_binary_frames() {
+    let (port, mut capture_rx) = run_capturing_server().await;
+    let (_event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (msg_tx, _msg_rx) = mpsc::unbounded_channel();
+    let listener = IntegrationListener {
+        events: _event_tx,
+        received_messages: msg_tx,
+    };
+    let config = stuck_config().with_message_format(MessageFormat::Binary);
+    let url = format!("ws://127.0.0.1:{}/ws", port);
+    let client: Client<String, String> = Client::new(config, Arc::new(listener), &url);
+    client.connect().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    client.send("hello".to_string()).await.unwrap();
+    let (_, is_text) = tokio::time::timeout(Duration::from_secs(5), capture_rx.recv())
+        .await
+        .expect("timeout waiting for captured request")
+        .expect("capture channel closed");
+    assert!(!is_text);
+    client.disconnect().await.unwrap();
+}

@@ -1,5 +1,59 @@
 use crate::{circuit_breaker::CircuitBreakerConfig, tls::TlsConfig};
+use http::{HeaderMap, HeaderName, HeaderValue};
 use std::time::Duration;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MessageFormat {
+    Json,
+    #[default]
+    Binary,
+}
+
+pub trait IntoHeaderMap {
+    fn into_header_map(self) -> HeaderMap;
+}
+
+impl IntoHeaderMap for HeaderMap {
+    fn into_header_map(self) -> HeaderMap {
+        self
+    }
+}
+
+impl IntoHeaderMap for &HeaderMap {
+    fn into_header_map(self) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in self {
+            map.append(name.clone(), value.clone());
+        }
+        map
+    }
+}
+
+impl<N, V> IntoHeaderMap for Vec<(N, V)>
+where
+    N: TryInto<HeaderName>,
+    V: TryInto<HeaderValue>,
+{
+    fn into_header_map(self) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in self {
+            let name = name.try_into().ok().expect("invalid HTTP header name");
+            let value = value.try_into().ok().expect("invalid HTTP header value");
+            map.append(name, value);
+        }
+        map
+    }
+}
+
+impl<N, V, const C: usize> IntoHeaderMap for [(N, V); C]
+where
+    N: TryInto<HeaderName>,
+    V: TryInto<HeaderValue>,
+{
+    fn into_header_map(self) -> HeaderMap {
+        self.into_iter().collect::<Vec<_>>().into_header_map()
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub enum ServerCloseBehavior {
@@ -21,6 +75,8 @@ pub struct Config {
     pub(crate) circuit_breaker: CircuitBreakerConfig,
     pub(crate) disconnect_timeout: Duration,
     pub(crate) disconnected_behavior: DisconnectedBehavior,
+    pub(crate) headers: HeaderMap,
+    pub(crate) message_format: MessageFormat,
     pub(crate) message_timeout: Duration,
     pub(crate) ping_interval: Duration,
     pub(crate) pong_timeout: Duration,
@@ -35,6 +91,8 @@ impl Default for Config {
             circuit_breaker: CircuitBreakerConfig::default(),
             disconnect_timeout: Duration::from_secs(10),
             disconnected_behavior: DisconnectedBehavior::default(),
+            headers: HeaderMap::new(),
+            message_format: MessageFormat::default(),
             message_timeout: Duration::from_secs(10),
             ping_interval: Duration::from_secs(30),
             pong_timeout: Duration::from_secs(30),
@@ -68,6 +126,24 @@ impl Config {
         self.disconnected_behavior = behavior;
         self
     }
+    pub fn with_headers(mut self, headers: impl IntoHeaderMap) -> Self {
+        self.headers = headers.into_header_map();
+        self
+    }
+    pub fn with_header<N, V>(mut self, name: N, value: V) -> Self
+    where
+        N: TryInto<HeaderName>,
+        V: TryInto<HeaderValue>,
+    {
+        let name = name.try_into().ok().expect("invalid HTTP header name");
+        let value = value.try_into().ok().expect("invalid HTTP header value");
+        self.headers.append(name, value);
+        self
+    }
+    pub fn with_message_format(mut self, message_format: MessageFormat) -> Self {
+        self.message_format = message_format;
+        self
+    }
     pub fn with_message_timeout(mut self, message_timeout: Duration) -> Self {
         self.message_timeout = message_timeout;
         self
@@ -98,6 +174,12 @@ impl Config {
     pub(crate) fn disconnect_queue_behavior(&self) -> &DisconnectedBehavior {
         &self.disconnected_behavior
     }
+    pub fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
+    pub fn message_format(&self) -> MessageFormat {
+        self.message_format
+    }
     pub(crate) fn message_timeout(&self) -> Duration {
         self.message_timeout
     }
@@ -112,5 +194,54 @@ impl Config {
     }
     pub(crate) fn tls_config(&self) -> &TlsConfig {
         &self.tls_config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn headers_can_be_added_individually() {
+        let config = Config::new()
+            .with_header("authorization", "Bearer token")
+            .with_header("x-request-id", "123");
+        assert_eq!(
+            config.headers().get("authorization").unwrap(),
+            "Bearer token"
+        );
+        assert_eq!(config.headers().get("x-request-id").unwrap(), "123");
+    }
+
+    #[test]
+    fn headers_can_be_added_from_a_list() {
+        let config = Config::new().with_headers(vec![
+            ("authorization", "Bearer token"),
+            ("x-request-id", "123"),
+        ]);
+        assert_eq!(
+            config.headers().get("authorization").unwrap(),
+            "Bearer token"
+        );
+        assert_eq!(config.headers().get("x-request-id").unwrap(), "123");
+    }
+
+    #[test]
+    fn headers_can_be_replaced_from_a_header_map() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", "123".parse().unwrap());
+        let config = Config::new().with_headers(headers);
+        assert_eq!(config.headers().get("x-request-id").unwrap(), "123");
+    }
+
+    #[test]
+    fn message_format_defaults_to_binary() {
+        assert_eq!(Config::new().message_format(), MessageFormat::Binary);
+        assert_eq!(
+            Config::new()
+                .with_message_format(MessageFormat::Json)
+                .message_format(),
+            MessageFormat::Json
+        );
     }
 }

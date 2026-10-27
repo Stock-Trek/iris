@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, DisconnectedBehavior, ServerCloseBehavior},
+    config::{Config, DisconnectedBehavior, MessageFormat, ServerCloseBehavior},
     error::ConnectionError,
     listener::SharedListener,
     outbound_message::OutboundMessage,
@@ -274,11 +274,22 @@ where
         let connector = self.config.tls_config().build_connector()?;
         tracing::debug!("opening connection");
         let (ws_stream, _response) = {
-            let builder = ClientBuilder::new().uri(&self.url).map_err(|e| {
+            let mut builder = ClientBuilder::new().uri(&self.url).map_err(|e| {
                 let err = ConnectionError::InvalidUri(e);
                 tracing::error!(error = %err, "invalid URI");
                 err
             })?;
+            for (name, value) in self.config.headers() {
+                builder = match builder.add_header(name.clone(), value.clone()) {
+                    Ok(builder) => builder,
+                    Err(e) => {
+                        let err = ConnectionError::Websocket(e);
+                        tracing::error!(error = %err, "failed to add request header");
+                        self.listener.on_error(&err).await;
+                        return Err(err);
+                    }
+                };
+            }
             let builder = builder.connector(&connector);
             let connect_future = builder.connect();
             tokio::pin!(connect_future);
@@ -490,18 +501,34 @@ where
         outgoing: OutboundMessage<Request>,
     ) -> Result<(), ConnectionError> {
         let OutboundMessage { message, ack } = outgoing;
-        let payload = match serde_json::to_vec(&message) {
-            Ok(payload) => payload,
-            Err(serialization_error) => {
-                let err = ConnectionError::Serialization(serialization_error);
-                tracing::error!(error = %err, "message serialization failed");
-                self.listener.on_error(&err).await;
-                let _ = ack.send(Err(err));
-                return Ok(());
-            }
+        let (message, size_bytes) = match self.config.message_format() {
+            MessageFormat::Json => match serde_json::to_string(&message) {
+                Ok(payload) => {
+                    let size_bytes = payload.len();
+                    (Message::text(payload), size_bytes)
+                }
+                Err(serialization_error) => {
+                    let err = ConnectionError::Serialization(serialization_error);
+                    tracing::error!(error = %err, "message serialization failed");
+                    self.listener.on_error(&err).await;
+                    let _ = ack.send(Err(err));
+                    return Ok(());
+                }
+            },
+            MessageFormat::Binary => match serde_json::to_vec(&message) {
+                Ok(payload) => {
+                    let size_bytes = payload.len();
+                    (Message::binary(payload), size_bytes)
+                }
+                Err(serialization_error) => {
+                    let err = ConnectionError::Serialization(serialization_error);
+                    tracing::error!(error = %err, "message serialization failed");
+                    self.listener.on_error(&err).await;
+                    let _ = ack.send(Err(err));
+                    return Ok(());
+                }
+            },
         };
-        let size_bytes = payload.len();
-        let message = Message::binary(payload);
         match tokio::time::timeout(
             self.config.message_timeout(),
             self.ws_stream.as_mut().unwrap().send(message),
