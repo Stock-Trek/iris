@@ -1,4 +1,5 @@
 use crate::error::ConnectionError;
+use http::HeaderMap;
 use serde::de::DeserializeOwned;
 use std::{fmt::Debug, sync::Arc, time::Duration};
 
@@ -10,6 +11,7 @@ where
     Response: DeserializeOwned + Send + 'static,
 {
     async fn on_connecting(&self) {}
+    async fn on_handshake_response(&self, _status: u16, _headers: &HeaderMap) {}
     async fn on_connection_backoff(&self, _delay_millis: u64) {}
     async fn on_reconnecting(&self, _attempt: u32) {}
     async fn on_connected(&self) {}

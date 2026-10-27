@@ -891,3 +891,91 @@ async fn disconnect_during_connect_returns_promptly() {
     );
     assert!(!client.is_connected());
 }
+
+#[derive(Debug)]
+struct HandshakeListener {
+    handshake: mpsc::UnboundedSender<(u16, http::HeaderMap)>,
+}
+
+#[async_trait::async_trait]
+impl Listener<String> for HandshakeListener {
+    async fn on_message(&self, _message: String) {}
+
+    async fn on_handshake_response(&self, status: u16, headers: &http::HeaderMap) {
+        self.handshake.send((status, headers.clone())).ok();
+    }
+}
+
+#[tokio::test]
+async fn sends_handshake_headers_and_reports_handshake_response() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind");
+    let port = listener.local_addr().unwrap().port();
+    let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let builder = ServerBuilder::new()
+            .add_header(
+                http::header::SET_COOKIE,
+                http::HeaderValue::from_static("session=abc"),
+            )
+            .unwrap();
+        if let Ok((request, mut ws_stream)) = builder.accept(stream).await {
+            request_tx.send(request).ok();
+            while let Some(Ok(msg)) = ws_stream.next().await {
+                if msg.is_close() {
+                    break;
+                }
+            }
+        }
+    });
+
+    let (handshake_tx, mut handshake_rx) = mpsc::unbounded_channel();
+    let listener = HandshakeListener {
+        handshake: handshake_tx,
+    };
+
+    let config = Config::new()
+        .with_header(
+            http::header::AUTHORIZATION,
+            http::HeaderValue::from_static("Bearer test-token"),
+        )
+        .with_subprotocol("chat")
+        .unwrap()
+        .with_ping_interval(Duration::from_secs(3600))
+        .with_pong_timeout(Duration::from_secs(3600));
+
+    let url = format!("ws://127.0.0.1:{}/ws", port);
+    let client: Client<String, String> = Client::new(config, Arc::new(listener), &url);
+    client.connect().await.unwrap();
+
+    let request = tokio::time::timeout(Duration::from_secs(5), request_rx)
+        .await
+        .expect("timeout waiting for handshake request")
+        .expect("server did not receive handshake request");
+    assert_eq!(
+        request.headers().get(http::header::AUTHORIZATION).unwrap(),
+        "Bearer test-token"
+    );
+    assert_eq!(
+        request
+            .headers()
+            .get(http::header::SEC_WEBSOCKET_PROTOCOL)
+            .unwrap(),
+        "chat"
+    );
+
+    let (status, headers) = tokio::time::timeout(Duration::from_secs(5), handshake_rx.recv())
+        .await
+        .expect("timeout waiting for handshake response callback")
+        .expect("handshake callback channel closed");
+    assert_eq!(status, 101);
+    assert_eq!(
+        headers.get(http::header::SET_COOKIE).unwrap(),
+        "session=abc"
+    );
+
+    client.disconnect().await.unwrap();
+}

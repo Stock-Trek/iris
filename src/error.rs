@@ -10,6 +10,7 @@ pub enum ConnectionError {
     DisconnectRequested,
     DisconnectionError(JoinError),
     InternalState,
+    InvalidHeader(String),
     InvalidUri(InvalidUri),
     MaxReconnectAttempts(u32),
     PongTimeout,
@@ -27,6 +28,7 @@ impl ConnectionError {
         matches!(
             self,
             Self::InvalidUri(_)
+                | Self::InvalidHeader(_)
                 | Self::Deserialization(_)
                 | Self::Serialization(_)
                 | Self::BadMessagePayload
@@ -45,6 +47,7 @@ impl std::fmt::Display for ConnectionError {
             Self::DisconnectRequested => write!(f, "disconnect requested"),
             Self::DisconnectionError(e) => write!(f, "disconnection error: {e}"),
             Self::InternalState => write!(f, "internal state error"),
+            Self::InvalidHeader(msg) => write!(f, "invalid header: {msg}"),
             Self::InvalidUri(e) => write!(f, "invalid URI: {e}"),
             Self::MaxReconnectAttempts(n) => {
                 write!(f, "max reconnect attempts reached ({n})")
@@ -119,6 +122,12 @@ mod tests {
     }
 
     #[test]
+    fn display_invalid_header() {
+        let err = ConnectionError::InvalidHeader("bad name".to_string());
+        assert_eq!(err.to_string(), "invalid header: bad name");
+    }
+
+    #[test]
     fn display_max_reconnect_attempts() {
         let err = ConnectionError::MaxReconnectAttempts(5);
         assert_eq!(err.to_string(), "max reconnect attempts reached (5)");
@@ -190,6 +199,11 @@ mod tests {
     fn is_permanent_invalid_uri() {
         let inner = "http://[::1".parse::<http::Uri>().unwrap_err();
         assert!(ConnectionError::InvalidUri(inner).is_permanent());
+    }
+
+    #[test]
+    fn is_permanent_invalid_header() {
+        assert!(ConnectionError::InvalidHeader("bad".into()).is_permanent());
     }
 
     #[test]
