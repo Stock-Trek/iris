@@ -273,12 +273,24 @@ where
         tracing::debug!("resolving URI");
         let connector = self.config.tls_config().build_connector()?;
         tracing::debug!("opening connection");
-        let (ws_stream, _response) = {
+        let (ws_stream, response) = {
             let builder = ClientBuilder::new().uri(&self.url).map_err(|e| {
                 let err = ConnectionError::InvalidUri(e);
                 tracing::error!(error = %err, "invalid URI");
                 err
             })?;
+            let mut builder = builder;
+            for (name, value) in self.config.headers() {
+                builder = builder
+                    .add_header(name.clone(), value.clone())
+                    .map_err(|e| {
+                        let err = ConnectionError::InvalidHeader(format!(
+                            "header '{name}' rejected: {e}"
+                        ));
+                        tracing::error!(error = %err, "invalid handshake header");
+                        err
+                    })?;
+            }
             let builder = builder.connector(&connector);
             let connect_future = builder.connect();
             tokio::pin!(connect_future);
@@ -299,6 +311,9 @@ where
                 }
             }
         };
+        self.listener
+            .on_handshake_response(response.status().as_u16(), response.headers())
+            .await;
         tracing::info!("connection established");
         self.ws_stream = Some(ws_stream);
         Ok(())
