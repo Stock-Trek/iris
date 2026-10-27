@@ -19,7 +19,7 @@ jobs:
         uses: Infisical/secrets-action@v1.0.16
         with:
           method: "oidc"
-          identity-id: "c603d49b-292c-42ae-b838-52e03e3c3a84"
+          identity-id: "2aecd8e8-fa70-41c3-bf79-a124b5675a46"
           project-slug: "agents"
           env-slug: "dev"
 
