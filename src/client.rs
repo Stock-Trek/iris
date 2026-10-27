@@ -1,5 +1,5 @@
 use crate::{
-    codec::{Codec, JsonCodec},
+    codec::JsonCodec,
     config::Config,
     error::ConnectionError,
     handler::ConnectionHandler,
@@ -17,15 +17,15 @@ use tokio::{
 };
 
 #[derive(Debug)]
-pub struct Client<Request, Response, C = JsonCodec>
+pub struct Client<Request, Response, Codec = JsonCodec>
 where
     Request: Send + 'static,
     Response: Send + 'static,
-    C: Codec<Request, Response>,
+    Codec: crate::codec::Codec<Request, Response>,
 {
     config: Config,
     listener: SharedListener<Response>,
-    codec: Arc<C>,
+    codec: Arc<Codec>,
     url: String,
     state: Arc<RwLock<Option<ClientState<Request>>>>,
 }
@@ -51,18 +51,18 @@ where
     }
 }
 
-impl<Request, Response, C> Client<Request, Response, C>
+impl<Request, Response, Codec> Client<Request, Response, Codec>
 where
     Request: Send + 'static,
     Response: Send + 'static,
-    C: Codec<Request, Response>,
+    Codec: crate::codec::Codec<Request, Response>,
 {
     /// Creates a client that uses the supplied codec for all messages.
     pub fn with_codec(
         config: Config,
         listener: SharedListener<Response>,
         url: &str,
-        codec: C,
+        codec: Codec,
     ) -> Self {
         Self {
             config,
@@ -78,12 +78,12 @@ where
         config: Config,
         listener: SharedListener<Response>,
         url: &str,
-        codec: C,
+        codec: Codec,
     ) -> Self {
         Self::with_codec(config, listener, url, codec)
     }
 
-    pub fn codec(&self) -> &C {
+    pub fn codec(&self) -> &Codec {
         &self.codec
     }
 

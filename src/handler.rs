@@ -1,5 +1,4 @@
 use crate::{
-    codec::Codec,
     config::{Config, DisconnectedBehavior, ServerCloseBehavior},
     error::ConnectionError,
     listener::SharedListener,
@@ -24,16 +23,19 @@ use tokio_websockets::{
 use tracing::{Span, info_span};
 
 #[derive(Debug)]
-pub(crate) struct ConnectionHandler<Request, Response, C = crate::codec::JsonCodec>
-where
+pub(crate) struct ConnectionHandler<
+    Request,
+    Response,
+    Codec = crate::codec::JsonCodec,
+> where
     Request: Send + 'static,
     Response: Send + 'static,
-    C: Codec<Request, Response>,
+    Codec: crate::codec::Codec<Request, Response>,
 {
     url: String,
     config: Config,
     listener: SharedListener<Response>,
-    codec: Arc<C>,
+    codec: Arc<Codec>,
     message_receiver: Receiver<OutboundMessage<Request>>,
     disconnect_receiver: Receiver<()>,
     connected: Arc<AtomicBool>,
@@ -46,17 +48,17 @@ where
     span: Span,
 }
 
-impl<Request, Response, C> ConnectionHandler<Request, Response, C>
+impl<Request, Response, Codec> ConnectionHandler<Request, Response, Codec>
 where
     Request: Send + 'static,
     Response: Send + 'static,
-    C: Codec<Request, Response>,
+    Codec: crate::codec::Codec<Request, Response>,
 {
     pub(crate) fn new(
         url: &str,
         config: Config,
         listener: SharedListener<Response>,
-        codec: Arc<C>,
+        codec: Arc<Codec>,
         message_receiver: Receiver<OutboundMessage<Request>>,
         disconnect_receiver: Receiver<()>,
         connected: Arc<AtomicBool>,
