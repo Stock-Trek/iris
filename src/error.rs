@@ -5,6 +5,7 @@ use tokio_websockets::Error as WebsocketError;
 #[derive(Debug)]
 pub enum ConnectionError {
     BadMessagePayload,
+    Codec(String),
     ConnectionClosed,
     Deserialization(serde_json::Error),
     DisconnectRequested,
@@ -29,6 +30,7 @@ impl ConnectionError {
             self,
             Self::InvalidUri(_)
                 | Self::InvalidHeader(_)
+                | Self::Codec(_)
                 | Self::Deserialization(_)
                 | Self::Serialization(_)
                 | Self::BadMessagePayload
@@ -42,6 +44,7 @@ impl std::fmt::Display for ConnectionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BadMessagePayload => write!(f, "bad message payload"),
+            Self::Codec(e) => write!(f, "codec error: {e}"),
             Self::ConnectionClosed => write!(f, "connection closed"),
             Self::Deserialization(e) => write!(f, "deserialization error: {e}"),
             Self::DisconnectRequested => write!(f, "disconnect requested"),
@@ -99,6 +102,12 @@ mod tests {
     fn display_bad_message_payload() {
         let err = ConnectionError::BadMessagePayload;
         assert_eq!(err.to_string(), "bad message payload");
+    }
+
+    #[test]
+    fn display_codec() {
+        let err = ConnectionError::Codec("invalid payload".to_string());
+        assert_eq!(err.to_string(), "codec error: invalid payload");
     }
 
     #[test]
@@ -207,6 +216,11 @@ mod tests {
     }
 
     #[test]
+    fn is_permanent_codec() {
+        assert!(ConnectionError::Codec("invalid".into()).is_permanent());
+    }
+
+    #[test]
     fn is_permanent_deserialization() {
         let inner = make_json_error();
         assert!(ConnectionError::Deserialization(inner).is_permanent());
@@ -278,6 +292,11 @@ mod tests {
     }
 
     // --- source() tests ---
+
+    #[test]
+    fn source_none_for_codec() {
+        assert!(ConnectionError::Codec("invalid".into()).source().is_none());
+    }
 
     #[test]
     fn source_deserialization() {

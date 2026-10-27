@@ -1,6 +1,6 @@
 use crate::{
-    config::Config, error::ConnectionError, handler::ConnectionHandler, listener::SharedListener,
-    outbound_message::OutboundMessage,
+    codec::JsonCodec, config::Config, error::ConnectionError, handler::ConnectionHandler,
+    listener::SharedListener, outbound_message::OutboundMessage,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::{
@@ -13,13 +13,15 @@ use tokio::{
 };
 
 #[derive(Debug)]
-pub struct Client<Request, Response>
+pub struct Client<Request, Response, Codec = JsonCodec>
 where
-    Request: Serialize + Send + 'static,
-    Response: DeserializeOwned + Send + 'static,
+    Request: Send + 'static,
+    Response: Send + 'static,
+    Codec: crate::codec::Codec<Request, Response>,
 {
     config: Config,
     listener: SharedListener<Response>,
+    codec: Arc<Codec>,
     url: String,
     state: Arc<RwLock<Option<ClientState<Request>>>>,
 }
@@ -27,7 +29,7 @@ where
 #[derive(Debug)]
 struct ClientState<Request>
 where
-    Request: Serialize + Send + 'static,
+    Request: Send + 'static,
 {
     message_sender: Sender<OutboundMessage<Request>>,
     disconnect_sender: Sender<()>,
@@ -35,18 +37,40 @@ where
     connected: Arc<AtomicBool>,
 }
 
-impl<Request, Response> Client<Request, Response>
+impl<Request, Response> Client<Request, Response, JsonCodec>
 where
     Request: Serialize + Send + 'static,
     Response: DeserializeOwned + Send + 'static,
 {
     pub fn new(config: Config, listener: SharedListener<Response>, url: &str) -> Self {
+        Self::new_with_codec(config, listener, url, JsonCodec)
+    }
+}
+
+impl<Request, Response, Codec> Client<Request, Response, Codec>
+where
+    Request: Send + 'static,
+    Response: Send + 'static,
+    Codec: crate::codec::Codec<Request, Response>,
+{
+    /// Creates a client that uses the supplied codec for all messages.
+    pub fn new_with_codec(
+        config: Config,
+        listener: SharedListener<Response>,
+        url: &str,
+        codec: Codec,
+    ) -> Self {
         Self {
             config,
             listener,
+            codec: Arc::new(codec),
             url: url.to_string(),
             state: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub fn codec(&self) -> &Codec {
+        &self.codec
     }
 
     pub async fn connect(&self) -> Result<(), ConnectionError> {
@@ -66,6 +90,7 @@ where
             &self.url,
             self.config.clone(),
             self.listener.clone(),
+            Arc::clone(&self.codec),
             message_receiver,
             disconnect_receiver,
             connected.clone(),
@@ -246,6 +271,53 @@ mod tests {
     #[async_trait::async_trait]
     impl Listener<TestResponse> for TestListener {
         async fn on_message(&self, _message: TestResponse) {}
+    }
+
+    #[derive(Debug, Default)]
+    struct RawBytesCodec;
+
+    impl Codec<Vec<u8>, Vec<u8>> for RawBytesCodec {
+        fn encode(&self, request: &Vec<u8>) -> Result<Vec<u8>, ConnectionError> {
+            Ok(request.clone())
+        }
+
+        fn decode(&self, message: tokio_websockets::Message) -> Result<Vec<u8>, ConnectionError> {
+            Ok(message.into_payload().to_vec())
+        }
+    }
+
+    #[derive(Debug)]
+    struct RawBytesListener(tokio::sync::mpsc::UnboundedSender<Vec<u8>>);
+
+    #[async_trait::async_trait]
+    impl Listener<Vec<u8>> for RawBytesListener {
+        async fn on_message(&self, message: Vec<u8>) {
+            self.0.send(message).ok();
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_codec_round_trip_does_not_require_serde() {
+        let (port, _shutdown) = run_echo_server().await;
+        let (message_tx, mut message_rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = Arc::new(Client::new_with_codec(
+            Config::new(),
+            Arc::new(RawBytesListener(message_tx)),
+            &format!("ws://127.0.0.1:{}/ws", port),
+            RawBytesCodec,
+        ));
+        client.connect().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let payload = vec![0, 1, 2, 3, 255];
+        client.send(payload.clone()).await.unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(5), message_rx.recv())
+            .await
+            .expect("timeout waiting for echoed bytes")
+            .expect("listener channel closed");
+        assert_eq!(received, payload);
+
+        client.disconnect().await.unwrap();
     }
 
     #[tokio::test]
