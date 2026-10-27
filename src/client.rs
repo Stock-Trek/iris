@@ -1,10 +1,6 @@
 use crate::{
-    codec::JsonCodec,
-    config::Config,
-    error::ConnectionError,
-    handler::ConnectionHandler,
-    listener::SharedListener,
-    outbound_message::OutboundMessage,
+    codec::JsonCodec, config::Config, error::ConnectionError, handler::ConnectionHandler,
+    listener::SharedListener, outbound_message::OutboundMessage,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::{

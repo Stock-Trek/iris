@@ -23,11 +23,8 @@ use tokio_websockets::{
 use tracing::{Span, info_span};
 
 #[derive(Debug)]
-pub(crate) struct ConnectionHandler<
-    Request,
-    Response,
-    Codec = crate::codec::JsonCodec,
-> where
+pub(crate) struct ConnectionHandler<Request, Response, Codec = crate::codec::JsonCodec>
+where
     Request: Send + 'static,
     Response: Send + 'static,
     Codec: crate::codec::Codec<Request, Response>,
