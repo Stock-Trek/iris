@@ -43,7 +43,7 @@ where
     Response: DeserializeOwned + Send + 'static,
 {
     pub fn new(config: Config, listener: SharedListener<Response>, url: &str) -> Self {
-        Self::with_codec(config, listener, url, JsonCodec)
+        Self::new_with_codec(config, listener, url, JsonCodec)
     }
 }
 
@@ -54,7 +54,7 @@ where
     Codec: crate::codec::Codec<Request, Response>,
 {
     /// Creates a client that uses the supplied codec for all messages.
-    pub fn with_codec(
+    pub fn new_with_codec(
         config: Config,
         listener: SharedListener<Response>,
         url: &str,
@@ -67,16 +67,6 @@ where
             url: url.to_string(),
             state: Arc::new(RwLock::new(None)),
         }
-    }
-
-    /// Alias for [`Client::with_codec`].
-    pub fn new_with_codec(
-        config: Config,
-        listener: SharedListener<Response>,
-        url: &str,
-        codec: Codec,
-    ) -> Self {
-        Self::with_codec(config, listener, url, codec)
     }
 
     pub fn codec(&self) -> &Codec {
@@ -310,7 +300,7 @@ mod tests {
     async fn custom_codec_round_trip_does_not_require_serde() {
         let (port, _shutdown) = run_echo_server().await;
         let (message_tx, mut message_rx) = tokio::sync::mpsc::unbounded_channel();
-        let client = Arc::new(Client::with_codec(
+        let client = Arc::new(Client::new_with_codec(
             Config::new(),
             Arc::new(RawBytesListener(message_tx)),
             &format!("ws://127.0.0.1:{}/ws", port),
