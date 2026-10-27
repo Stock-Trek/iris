@@ -1,6 +1,5 @@
 use crate::error::ConnectionError;
 use http::HeaderMap;
-use serde::de::DeserializeOwned;
 use std::{fmt::Debug, sync::Arc, time::Duration};
 
 pub type SharedListener<Response> = Arc<dyn Listener<Response>>;
@@ -8,7 +7,7 @@ pub type SharedListener<Response> = Arc<dyn Listener<Response>>;
 #[async_trait::async_trait]
 pub trait Listener<Response>: Debug + Send + Sync + 'static
 where
-    Response: DeserializeOwned + Send + 'static,
+    Response: Send + 'static,
 {
     async fn on_connecting(&self) {}
     async fn on_handshake_response(&self, _status: u16, _headers: &HeaderMap) {}

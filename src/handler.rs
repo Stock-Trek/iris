@@ -1,4 +1,5 @@
 use crate::{
+    codec::Codec,
     config::{Config, DisconnectedBehavior, ServerCloseBehavior},
     error::ConnectionError,
     listener::SharedListener,
@@ -6,7 +7,6 @@ use crate::{
 };
 use futures::SinkExt;
 use rand::Rng;
-use serde::{Serialize, de::DeserializeOwned};
 use std::{
     cmp::min,
     sync::{
@@ -24,14 +24,16 @@ use tokio_websockets::{
 use tracing::{Span, info_span};
 
 #[derive(Debug)]
-pub(crate) struct ConnectionHandler<Request, Response>
+pub(crate) struct ConnectionHandler<Request, Response, C = crate::codec::JsonCodec>
 where
-    Request: Serialize + Send + 'static,
-    Response: DeserializeOwned + Send + 'static,
+    Request: Send + 'static,
+    Response: Send + 'static,
+    C: Codec<Request, Response>,
 {
     url: String,
     config: Config,
     listener: SharedListener<Response>,
+    codec: Arc<C>,
     message_receiver: Receiver<OutboundMessage<Request>>,
     disconnect_receiver: Receiver<()>,
     connected: Arc<AtomicBool>,
@@ -44,15 +46,17 @@ where
     span: Span,
 }
 
-impl<Request, Response> ConnectionHandler<Request, Response>
+impl<Request, Response, C> ConnectionHandler<Request, Response, C>
 where
-    Request: Serialize + Send + 'static,
-    Response: DeserializeOwned + Send + 'static,
+    Request: Send + 'static,
+    Response: Send + 'static,
+    C: Codec<Request, Response>,
 {
     pub(crate) fn new(
         url: &str,
         config: Config,
         listener: SharedListener<Response>,
+        codec: Arc<C>,
         message_receiver: Receiver<OutboundMessage<Request>>,
         disconnect_receiver: Receiver<()>,
         connected: Arc<AtomicBool>,
@@ -63,6 +67,7 @@ where
             url: url.to_string(),
             config,
             listener,
+            codec,
             message_receiver,
             disconnect_receiver,
             connected,
@@ -469,28 +474,12 @@ where
     }
 
     fn parse_message(&self, message: Message) -> Result<(Response, usize), ConnectionError> {
-        if message.is_text() {
-            if let Some(text) = message.as_text() {
-                let message = serde_json::from_str(text).map_err(|e| {
-                    let err = ConnectionError::Deserialization(e);
-                    tracing::error!(error = %err, "failed to deserialize text message");
-                    err
-                })?;
-                let size_bytes = text.len();
-                return Ok((message, size_bytes));
-            }
-        } else if message.is_binary() {
-            let payload = message.into_payload();
-            let message = serde_json::from_slice(&payload).map_err(|e| {
-                let err = ConnectionError::Deserialization(e);
-                tracing::error!(error = %err, "failed to deserialize binary message");
-                err
-            })?;
-            let size_bytes = payload.len();
-            return Ok((message, size_bytes));
-        }
-        tracing::warn!("received unexpected message type (not text or binary)");
-        Err(ConnectionError::BadMessagePayload)
+        let size_bytes = message.as_payload().len();
+        let message = self.codec.decode(message).map_err(|e| {
+            tracing::error!(error = %e, "failed to decode message");
+            e
+        })?;
+        Ok((message, size_bytes))
     }
 
     /// Writes a queued outbound message to the socket and reports the outcome
@@ -505,11 +494,10 @@ where
         outgoing: OutboundMessage<Request>,
     ) -> Result<(), ConnectionError> {
         let OutboundMessage { message, ack } = outgoing;
-        let payload = match serde_json::to_vec(&message) {
+        let payload = match self.codec.encode(&message) {
             Ok(payload) => payload,
-            Err(serialization_error) => {
-                let err = ConnectionError::Serialization(serialization_error);
-                tracing::error!(error = %err, "message serialization failed");
+            Err(err) => {
+                tracing::error!(error = %err, "message encoding failed");
                 self.listener.on_error(&err).await;
                 let _ = ack.send(Err(err));
                 return Ok(());
@@ -628,6 +616,7 @@ mod tests {
             "ws://localhost:0",
             config,
             listener,
+            Arc::new(crate::codec::JsonCodec),
             _msg_rx_recv,
             _disc_rx,
             connected,
@@ -654,6 +643,7 @@ mod tests {
             "ws://localhost:0",
             config,
             listener,
+            Arc::new(crate::codec::JsonCodec),
             _msg_rx_recv,
             _disc_rx,
             connected,
@@ -673,6 +663,7 @@ mod tests {
             "ws://localhost:0",
             config,
             listener,
+            Arc::new(crate::codec::JsonCodec),
             _msg_rx_recv,
             _disc_rx,
             connected,
@@ -702,6 +693,7 @@ mod tests {
             "ws://localhost:0",
             config,
             listener,
+            Arc::new(crate::codec::JsonCodec),
             _msg_rx_recv,
             _disc_rx,
             connected,
@@ -731,6 +723,7 @@ mod tests {
             "ws://localhost:0",
             config,
             listener,
+            Arc::new(crate::codec::JsonCodec),
             _msg_rx_recv,
             _disc_rx,
             connected,
@@ -739,8 +732,8 @@ mod tests {
         let result = handler.parse_message(msg);
         assert!(result.is_err());
         match result {
-            Err(ConnectionError::Deserialization(_)) => {}
-            _ => panic!("expected Deserialization error"),
+            Err(ConnectionError::Codec(_)) => {}
+            _ => panic!("expected Codec error"),
         }
     }
 
@@ -755,6 +748,7 @@ mod tests {
             "ws://localhost:0",
             config,
             listener,
+            Arc::new(crate::codec::JsonCodec),
             _msg_rx_recv,
             _disc_rx,
             connected,
@@ -763,8 +757,8 @@ mod tests {
         let result = handler.parse_message(invalid_json_msg);
         assert!(result.is_err());
         match result {
-            Err(ConnectionError::Deserialization(_)) => {}
-            _ => panic!("expected Deserialization error"),
+            Err(ConnectionError::Codec(_)) => {}
+            _ => panic!("expected Codec error"),
         }
     }
 
@@ -779,6 +773,7 @@ mod tests {
             "ws://localhost:0",
             config,
             listener,
+            Arc::new(crate::codec::JsonCodec),
             _msg_rx_recv,
             _disc_rx,
             connected,
@@ -803,6 +798,7 @@ mod tests {
             "ws://localhost:0",
             config,
             listener,
+            Arc::new(crate::codec::JsonCodec),
             _msg_rx_recv,
             _disc_rx,
             connected,
@@ -829,6 +825,7 @@ mod tests {
             "ws://localhost:0",
             config,
             listener,
+            Arc::new(crate::codec::JsonCodec),
             _msg_rx_recv,
             _disc_rx,
             connected,

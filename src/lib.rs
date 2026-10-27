@@ -1,5 +1,6 @@
 mod circuit_breaker;
 mod client;
+mod codec;
 mod config;
 mod error;
 mod handler;
@@ -12,6 +13,7 @@ mod tls;
 pub use {
     circuit_breaker::CircuitBreakerConfig,
     client::Client,
+    codec::{Codec, JsonCodec},
     config::{Config, DisconnectedBehavior, ServerCloseBehavior},
     error::ConnectionError,
     listener::{Listener, SharedListener},
